@@ -2036,12 +2036,10 @@ aproba@^1.0.3:
   resolved "https://registry.yarnpkg.com/aproba/-/aproba-2.0.0.tgz#52520b8ae5b569215b354efc0caa3fe1e45a8adc"
   integrity sha512-lYe4Gx7QT+MKGbDsA+Z+he/Wtef0BiwDOlK/XkBrdfsh9J/jPPXbX0tE9x9cl27Tmu5gg3QUbUrQYa/y+KOHPQ==
 
-"archive-view@https://codeload.github.com/atom/archive-view/legacy.tar.gz/refs/tags/v0.66.0":
+"archive-view@file:packages/archive-view":
   version "0.66.0"
-  resolved "https://codeload.github.com/atom/archive-view/legacy.tar.gz/refs/tags/v0.66.0#e4563bf7cf4d6916eee4a949ca260315e8b2fe06"
   dependencies:
     etch "0.9.0"
-    fs-plus "^3.0.0"
     humanize-plus "~1.8.2"
     ls-archive "1.3.4"
     temp "~0.8.1"
@@ -2286,9 +2284,8 @@ atom-slick@^2, atom-slick@^2.0.0:
     stable "^0.1.5"
     underscore-plus "^1.6.6"
 
-"autocomplete-snippets@https://codeload.github.com/atom/autocomplete-snippets/legacy.tar.gz/refs/tags/v1.12.1":
+"autocomplete-snippets@file:packages/autocomplete-snippets":
   version "1.12.1"
-  resolved "https://codeload.github.com/atom/autocomplete-snippets/legacy.tar.gz/refs/tags/v1.12.1#701fb4dcc06eba178c798b65e557510e4326e0fd"
 
 "autoflow@file:packages/autoflow":
   version "0.29.4"
@@ -2438,9 +2435,8 @@ babel-preset-atomic@^5.0.0:
     "@types/babel__core" "^7.1.19"
     "@types/babel__preset-env" "7.9.2"
 
-"background-tips@https://codeload.github.com/pulsar-edit/background-tips/legacy.tar.gz/refs/tags/v0.28.1":
+"background-tips@file:packages/background-tips":
   version "0.28.1"
-  resolved "https://codeload.github.com/pulsar-edit/background-tips/legacy.tar.gz/refs/tags/v0.28.1#acf57779caaf199e80368fb7b6d08cbe44f4f826"
   dependencies:
     underscore-plus "1.x"
 
@@ -2518,9 +2514,8 @@ bluebird@^3.5.0, bluebird@^3.5.5:
   resolved "https://registry.yarnpkg.com/bluebird/-/bluebird-3.7.2.tgz#9f229c15be272454ffa973ace0dbee79a1b0c36f"
   integrity sha512-XpNj6GDQzdfW+r2Wnn7xiSAd7TM3jzkxGXBGTtWKuSXv1xUV+azxAm8jdWZN06QTQk+2N2XB9jRDkvbmQmcRtg==
 
-"bookmarks@https://codeload.github.com/atom/bookmarks/legacy.tar.gz/refs/tags/v0.46.0":
+"bookmarks@file:packages/bookmarks":
   version "0.46.0"
-  resolved "https://codeload.github.com/atom/bookmarks/legacy.tar.gz/refs/tags/v0.46.0#6370ab1681697a1f59fcb6bc07e42fc5caa84ad0"
   dependencies:
     atom-select-list "^0.7.0"
 
@@ -3096,9 +3091,8 @@ combined-stream@^1.0.5, combined-stream@^1.0.6, combined-stream@^1.0.8, combined
   dependencies:
     delayed-stream "~1.0.0"
 
-"command-palette@https://codeload.github.com/atom/command-palette/legacy.tar.gz/refs/tags/v0.43.5":
+"command-palette@file:packages/command-palette":
   version "0.43.5"
-  resolved "https://codeload.github.com/atom/command-palette/legacy.tar.gz/refs/tags/v0.43.5#49a1d855ef778889219f97ce1d2102e3ac41bd18"
   dependencies:
     atom-select-list "^0.7.1"
     fuzzaldrin "^2.1.0"
@@ -3849,9 +3843,8 @@ encodeurl@^1.0.2:
   resolved "https://registry.yarnpkg.com/encodeurl/-/encodeurl-1.0.2.tgz#ad3ff4c86ec2d029322f5a02c3a9a606c95b3f59"
   integrity sha512-TPJXq8JqFaVYm2CWmPvnP2Iyo4ZSM7/QKcSmuMLDObfpH5fi7RUGmd/rTDf+rut/saiDiQEeVTNgAmJEdAOx0w==
 
-"encoding-selector@https://codeload.github.com/atom/encoding-selector/legacy.tar.gz/refs/tags/v0.23.9":
+"encoding-selector@file:packages/encoding-selector":
   version "0.23.9"
-  resolved "https://codeload.github.com/atom/encoding-selector/legacy.tar.gz/refs/tags/v0.23.9#b83bcb48d46e7e5a22a0b7b5893ebadb40dddd92"
   dependencies:
     atom-select-list "^0.7.0"
     iconv-lite "^0.4.4"
@@ -5232,9 +5225,8 @@ image-size@~0.5.0:
   resolved "https://registry.yarnpkg.com/image-size/-/image-size-0.5.5.tgz#09dfd4ab9d20e29eb1c3e80b8990378df9e3cb9c"
   integrity sha512-6TDAlDPZxUFCv+fuOkIoXT/V/f3Qbq8e37p+YOiYrUv3v9cc3/6x78VdfPgFVaB9dZYeLUfKgHRebpkm/oP2VQ==
 
-"image-view@https://codeload.github.com/atom/image-view/legacy.tar.gz/refs/tags/v0.64.0":
+"image-view@file:packages/image-view":
   version "0.64.0"
-  resolved "https://codeload.github.com/atom/image-view/legacy.tar.gz/refs/tags/v0.64.0#49cfc1c780ea30c813672802f3c54fd30217716d"
   dependencies:
     bytes "^3.0.0"
     etch "0.9.0"
@@ -7058,9 +7050,8 @@ oniguruma@^7.2.3:
   dependencies:
     nan "^2.14.0"
 
-"open-on-github@https://codeload.github.com/atom/open-on-github/legacy.tar.gz/refs/tags/v1.3.2":
+"open-on-github@file:packages/open-on-github":
   version "1.3.2"
-  resolved "https://codeload.github.com/atom/open-on-github/legacy.tar.gz/refs/tags/v1.3.2#1e1d9496b24bf608cc6cc06e68e4e93ac6cf760f"
 
 optimist@~0.3.5:
   version "0.3.7"
@@ -8492,9 +8483,8 @@ stat-mode@^1.0.0:
   resolved "https://registry.yarnpkg.com/stat-mode/-/stat-mode-1.0.0.tgz#68b55cb61ea639ff57136f36b216a291800d1465"
   integrity sha512-jH9EhtKIjuXZ2cWxmXS8ZP80XyC3iasQxMDV8jzhNJpfDb7VbQLVW4Wvsxz9QZvzV+G4YoSfBUVKDOyxLzi/sg==
 
-"status-bar@https://codeload.github.com/atom/status-bar/legacy.tar.gz/refs/tags/v1.8.17":
+"status-bar@file:packages/status-bar":
   version "1.8.17"
-  resolved "https://codeload.github.com/atom/status-bar/legacy.tar.gz/refs/tags/v1.8.17#539df70062d75397c3f49208ced60c8611e9ad3d"
   dependencies:
     fs-plus "^3.0.1"
     grim "^2.0.1"
@@ -8702,9 +8692,8 @@ tabbable@^5.1.5:
   resolved "https://registry.yarnpkg.com/tabbable/-/tabbable-5.3.3.tgz#aac0ff88c73b22d6c3c5a50b1586310006b47fbf"
   integrity sha512-QD9qKY3StfbZqWOPLp0++pOrAVb/HbUi5xCc8cUo4XjP19808oaMiDzn0leBY5mCespIBM0CIZePzZjgzR83kA==
 
-"tabs@https://codeload.github.com/atom/tabs/legacy.tar.gz/refs/tags/v0.110.2":
+"tabs@file:packages/tabs":
   version "0.110.2"
-  resolved "https://codeload.github.com/atom/tabs/legacy.tar.gz/refs/tags/v0.110.2#f62a36c30043a2b721b3c36d9a857531dd3360fb"
   dependencies:
     fs-plus "^3.0.0"
     temp "~0.8.1"
