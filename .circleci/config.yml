@@ -1,0 +1,145 @@
+version: 2.1
+
+defaults: &defaults
+  docker:
+    - image: cimg/node:16.19.1
+
+jobs:
+  build-editor:
+    <<: *defaults
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - node-deps-v1-{{ .Branch }}-{{checksum "yarn.lock"}}
+      - run: yarn install || yarn install
+      - run: yarn build || yarn build
+      - run: yarn build:apm || yarn build:apm
+      - run: (yarn dist deb || yarn dist deb) && mv binaries/*deb pulsar.deb
+      - save_cache:
+          key: node-deps-v1-{{ .Branch }}-{{checksum "yarn.lock"}}
+          paths:
+            - ~/.npm
+      - persist_to_workspace:
+          root: '.'
+          paths:
+            - .
+
+  package:
+    parameters:
+      package:
+        type: string
+    <<: *defaults
+    steps:
+      - attach_workspace:
+          at: '.'
+      - run:
+          name: Install Pulsar
+          command: sudo dpkg -i pulsar.deb && sudo apt-get -f install -y
+      - run:
+          name: Install xvfb
+          command: sudo apt-get install -y xvfb
+      - run:
+          name: Run << parameters.package >> Tests
+          command: Xvfb :1 & cd node_modules/<< parameters.package >> && if test -d spec; then DISPLAY=:1 pulsar --test spec; fi
+
+workflows:
+  orb-free-workflow:
+    jobs:
+      - build-editor
+      - package:
+          matrix:
+            parameters:
+              package:
+                - "atom-dark-syntax"
+                - "atom-dark-ui"
+                - "atom-light-syntax"
+                - "atom-light-ui"
+                - "base16-tomorrow-dark-theme"
+                - "base16-tomorrow-light-theme"
+                - "one-dark-ui"
+                - "one-light-ui"
+                - "one-dark-syntax"
+                - "one-light-syntax"
+                - "solarized-dark-syntax"
+                - "solarized-light-syntax"
+                - "about"
+                - "archive-view"
+                - "autocomplete-atom-api"
+                - "autocomplete-css"
+                - "autocomplete-html"
+                - "autocomplete-plus"
+                - "autocomplete-snippets"
+                - "autoflow"
+                - "autosave"
+                - "background-tips"
+                - "bookmarks"
+                - "bracket-matcher"
+                - "command-palette"
+                - "dalek"
+                - "deprecation-cop"
+                - "dev-live-reload"
+                - "encoding-selector"
+                - "exception-reporting"
+                - "find-and-replace"
+                - "fuzzy-finder"
+                - "github"
+                - "git-diff"
+                - "go-to-line"
+                - "grammar-selector"
+                - "image-view"
+                - "incompatible-packages"
+                - "keybinding-resolver"
+                - "line-ending-selector"
+                - "link"
+                - "markdown-preview"
+                - "notifications"
+                - "open-on-github"
+                - "package-generator"
+                - "settings-view"
+                - "snippets"
+                - "spell-check"
+                - "status-bar"
+                - "styleguide"
+                - "symbols-view"
+                - "tabs"
+                - "timecop"
+                - "tree-view"
+                - "update-package-dependencies"
+                - "welcome"
+                - "whitespace"
+                - "wrap-guide"
+                - "language-c"
+                - "language-clojure"
+                - "language-coffee-script"
+                - "language-csharp"
+                - "language-css"
+                - "language-gfm"
+                - "language-git"
+                - "language-go"
+                - "language-html"
+                - "language-hyperlink"
+                - "language-java"
+                - "language-javascript"
+                - "language-json"
+                - "language-less"
+                - "language-make"
+                - "language-mustache"
+                - "language-objective-c"
+                - "language-perl"
+                - "language-php"
+                - "language-property-list"
+                - "language-python"
+                - "language-ruby"
+                - "language-ruby-on-rails"
+                - "language-rust-bundled"
+                - "language-sass"
+                - "language-shellscript"
+                - "language-source"
+                - "language-sql"
+                - "language-text"
+                - "language-todo"
+                - "language-toml"
+                - "language-typescript"
+                - "language-xml"
+                - "language-yaml"
