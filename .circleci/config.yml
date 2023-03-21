@@ -39,7 +39,7 @@ jobs:
           at: '.'
       - run:
           name: Install Pulsar
-          command: sudo dpkg -i pulsar.deb && sudo apt-get -f install -y
+          command: sudo dpkg -i pulsar.deb ; sudo apt-get -f install -y
       - run:
           name: Install xvfb
           command: sudo apt-get install -y xvfb
