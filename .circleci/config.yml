@@ -39,7 +39,7 @@ jobs:
           at: '.'
       - run:
           name: Install Pulsar's deps
-          command: sudo apt-get update && sudo apt-get install -y libnotify4 libnss3 xdg-utils libnspr4
+          command: sudo apt-get update && sudo apt-get install -y libnotify4 libnss3 xdg-utils libnspr4 libxss1 libsecret-1-0 libsecret-common libgbm1 libasound2
       - run:
           name: Install Pulsar
           command: sudo dpkg -i pulsar.deb
