@@ -37,10 +37,12 @@ jobs:
     steps:
       - attach_workspace:
           at: '.'
-      - run: sudo apt-get update
+      - run:
+          name: Install Pulsar's deps
+          command: sudo apt-get update && sudo apt-get install -y libnotify4 libnss3 xdg-utils libnspr4
       - run:
           name: Install Pulsar
-          command: bash -e 'sudo dpkg -i pulsar.deb ; sudo apt-get -f install'
+          command: sudo dpkg -i pulsar.deb
       - run:
           name: Install xvfb
           command: sudo apt-get install -y xvfb
