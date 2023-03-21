@@ -48,6 +48,9 @@ workflows:
     jobs:
       - build-editor
       - package:
+          requires:
+            - build-editor
+
           matrix:
             parameters:
               package:
