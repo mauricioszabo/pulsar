@@ -73,13 +73,11 @@ module.exports = class TextEditorRegistry {
     this.editorsWithMaintainedConfig = null;
   }
 
-  // Register a `TextEditor`.
-  //
-  // * `editor` The editor to register.
-  //
-  // Returns a {Disposable} on which `.dispose()` can be called to remove the
-  // added editor. To avoid any memory leaks this should be called when the
-  // editor is destroyed.
+  /**
+   * Register a `TextEditor`.
+   * @param {Object} editor - The editor to register.
+   * @returns {Disposable} - A disposable on which `.dispose()` can be called to remove the added editor. To avoid any memory leaks this should be called when the editor is destroyed.
+   */
   add(editor) {
     this.editors.add(editor);
     editor.registered = true;
@@ -88,6 +86,11 @@ module.exports = class TextEditorRegistry {
     return new Disposable(() => this.remove(editor));
   }
 
+  /**
+   * Build a new TextEditor with the given parameters.
+   * @param {Object} params - The parameters to use when building the new TextEditor.
+   * @returns {TextEditor} - The newly built TextEditor.
+   */
   build(params) {
     params = Object.assign({ assert: this.assert }, params);
 
@@ -104,20 +107,21 @@ module.exports = class TextEditorRegistry {
     return new TextEditor(params);
   }
 
-  // Remove a `TextEditor`.
-  //
-  // * `editor` The editor to remove.
-  //
-  // Returns a {Boolean} indicating whether the editor was successfully removed.
+  /**
+   * Remove a `TextEditor`.
+   * @param {Object} editor - The editor to remove.
+   * @returns {Boolean} - A boolean indicating whether the editor was successfully removed.
+   */
   remove(editor) {
     const removed = this.editors.delete(editor);
     editor.registered = false;
     return removed;
   }
 
-  // Gets the currently active text editor.
-  //
-  // Returns the currently active text editor, or `null` if there is none.
+  /**
+   * Gets the currently active text editor.
+   * @returns {TextEditor|null} - The currently active text editor, or `null` if there is none.
+   */
   getActiveTextEditor() {
     for (let ed of this.editors) {
       // fast path, works as long as there's a shadow DOM inside the text editor
@@ -137,23 +141,21 @@ module.exports = class TextEditorRegistry {
     return null;
   }
 
-  // Invoke the given callback with all the current and future registered
-  // `TextEditors`.
-  //
-  // * `callback` {Function} to be called with current and future text editors.
-  //
-  // Returns a {Disposable} on which `.dispose()` can be called to unsubscribe.
+  /**
+   * Invoke the given callback with all the current and future registered `TextEditors`.
+   * @param {Function} callback - The function to be called with current and future text editors.
+   * @returns {Disposable} - A disposable on which `.dispose()` can be called to unsubscribe.
+   */
   observe(callback) {
     this.editors.forEach(callback);
     return this.emitter.on('did-add-editor', callback);
   }
 
-  // Keep a {TextEditor}'s configuration in sync with Atom's settings.
-  //
-  // * `editor` The editor whose configuration will be maintained.
-  //
-  // Returns a {Disposable} that can be used to stop updating the editor's
-  // configuration.
+  /**
+   * Keep a {TextEditor}'s configuration in sync with Atom's settings.
+   * @param {TextEditor} editor - The editor whose configuration will be maintained.
+   * @returns {Disposable} - A disposable that can be used to stop updating the editor's configuration.
+   */
   maintainConfig(editor) {
     if (this.editorsWithMaintainedConfig.has(editor)) {
       return new Disposable(noop);
@@ -192,41 +194,41 @@ module.exports = class TextEditorRegistry {
     });
   }
 
-  // Deprecated: set a {TextEditor}'s grammar based on its path and content,
-  // and continue to update its grammar as grammars are added or updated, or
-  // the editor's file path changes.
-  //
-  // * `editor` The editor whose grammar will be maintained.
-  //
-  // Returns a {Disposable} that can be used to stop updating the editor's
-  // grammar.
+  /**
+   * @deprecated
+   * Set a {TextEditor}'s grammar based on its path and content, and continue to update its grammar as grammars are added or updated, or the editor's file path changes.
+   * @param {TextEditor} editor - The editor whose grammar will be maintained.
+   * @returns {Disposable} - A disposable that can be used to stop updating the editor's grammar.
+   */
   maintainGrammar(editor) {
     atom.grammars.maintainLanguageMode(editor.getBuffer());
   }
 
-  // Deprecated: Force a {TextEditor} to use a different grammar than the
-  // one that would otherwise be selected for it.
-  //
-  // * `editor` The editor whose gramamr will be set.
-  // * `languageId` The {String} language ID for the desired {Grammar}.
+  /**
+   * @deprecated
+   * Force a {TextEditor} to use a different grammar than the one that would otherwise be selected for it.
+   * @param {TextEditor} editor - The editor whose grammar will be set.
+   * @param {String} languageId - The language ID for the desired {Grammar}.
+   */
   setGrammarOverride(editor, languageId) {
     atom.grammars.assignLanguageMode(editor.getBuffer(), languageId);
   }
 
-  // Deprecated: Retrieve the grammar scope name that has been set as a
-  // grammar override for the given {TextEditor}.
-  //
-  // * `editor` The editor.
-  //
-  // Returns a {String} scope name, or `null` if no override has been set
-  // for the given editor.
+  /**
+   * @deprecated
+   * Retrieve the grammar scope name that has been set as a grammar override for the given {TextEditor}.
+   * @param {TextEditor} editor - The editor.
+   * @returns {String|null} - A string scope name, or `null` if no override has been set for the given editor.
+   */
   getGrammarOverride(editor) {
     return atom.grammars.getAssignedLanguageId(editor.getBuffer());
   }
 
-  // Deprecated: Remove any grammar override that has been set for the given {TextEditor}.
-  //
-  // * `editor` The editor.
+  /**
+   * @deprecated
+   * Remove any grammar override that has been set for the given {TextEditor}.
+   * @param {TextEditor} editor - The editor.
+   */
   clearGrammarOverride(editor) {
     atom.grammars.autoAssignLanguageMode(editor.getBuffer());
   }
