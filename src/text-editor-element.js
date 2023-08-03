@@ -73,13 +73,11 @@ class TextEditorElement extends HTMLElement {
     }
   }
 
-  // Extended: Get a promise that resolves the next time the element's DOM
-  // is updated in any way.
-  //
-  // This can be useful when you've made a change to the model and need to
-  // be sure this change has been flushed to the DOM.
-  //
-  // Returns a {Promise}.
+  /**
+   * Get a promise that resolves the next time the element's DOM is updated in any way.
+   * This can be useful when you've made a change to the model and need to be sure this change has been flushed to the DOM.
+   * @returns {Promise} - A promise that resolves the next time the element's DOM is updated.
+   */
   getNextUpdatePromise() {
     return this.getComponent().getNextUpdatePromise();
   }
@@ -225,17 +223,12 @@ class TextEditorElement extends HTMLElement {
     return this.getComponent().focused;
   }
 
-  // Extended: Converts a buffer position to a pixel position.
-  //
-  // * `bufferPosition` A {Point}-like object that represents a buffer position.
-  //
-  // Be aware that calling this method with a column that does not translate
-  // to column 0 on screen could cause a synchronous DOM update in order to
-  // measure the requested horizontal pixel position if it isn't already
-  // cached.
-  //
-  // Returns an {Object} with two values: `top` and `left`, representing the
-  // pixel position.
+  /**
+   * Converts a buffer position to a pixel position.
+   * Be aware that calling this method with a column that does not translate to column 0 on screen could cause a synchronous DOM update in order to measure the requested horizontal pixel position if it isn't already cached.
+   * @param {Object} bufferPosition - A {Point}-like object that represents a buffer position.
+   * @returns {Object} - An object with two values: `top` and `left`, representing the pixel position.
+   */
   pixelPositionForBufferPosition(bufferPosition) {
     const screenPosition = this.getModel().screenPositionForBufferPosition(
       bufferPosition
@@ -243,16 +236,12 @@ class TextEditorElement extends HTMLElement {
     return this.getComponent().pixelPositionForScreenPosition(screenPosition);
   }
 
-  // Extended: Converts a screen position to a pixel position.
-  //
-  // * `screenPosition` A {Point}-like object that represents a buffer position.
-  //
-  // Be aware that calling this method with a non-zero column value could
-  // cause a synchronous DOM update in order to measure the requested
-  // horizontal pixel position if it isn't already cached.
-  //
-  // Returns an {Object} with two values: `top` and `left`, representing the
-  // pixel position.
+  /**
+   * Converts a screen position to a pixel position.
+   * Be aware that calling this method with a non-zero column value could cause a synchronous DOM update in order to measure the requested horizontal pixel position if it isn't already cached.
+   * @param {Object} screenPosition - A {Point}-like object that represents a buffer position.
+   * @returns {Object} - An object with two values: `top` and `left`, representing the pixel position.
+   */
   pixelPositionForScreenPosition(screenPosition) {
     screenPosition = this.getModel().clipScreenPosition(screenPosition);
     return this.getComponent().pixelPositionForScreenPosition(screenPosition);
@@ -312,12 +301,10 @@ class TextEditorElement extends HTMLElement {
       : this.updatedSynchronously;
   }
 
-  // Experimental: Invalidate the passed block {Decoration}'s dimensions,
-  // forcing them to be recalculated and the surrounding content to be adjusted
-  // on the next animation frame.
-  //
-  // * {blockDecoration} A {Decoration} representing the block decoration you
-  // want to update the dimensions of.
+  /**
+   * Invalidate the passed block {Decoration}'s dimensions, forcing them to be recalculated and the surrounding content to be adjusted on the next animation frame.
+   * @param {Object} blockDecoration - A {Decoration} representing the block decoration you want to update the dimensions of.
+   */
   invalidateBlockDecorationDimensions() {
     this.getComponent().invalidateBlockDecorationDimensions(...arguments);
   }
