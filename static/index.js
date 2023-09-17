@@ -7,7 +7,7 @@
   const path = require('path');
   const Module = require('module');
   const getWindowLoadSettings = require('../src/get-window-load-settings');
-  const getReleaseChannel = require('../src/get-release-channel');
+  const { getReleaseChannel } = require('../src/get-app-details.js');
   const StartupTime = require('../src/startup-time');
   const entryPointDirPath = __dirname;
   let blobStore = null;
@@ -19,10 +19,11 @@
   }
   StartupTime.addMarker('window:start', startWindowTime);
 
-  window.onload = function() {
+  window.onload = async function() {
     try {
       StartupTime.addMarker('window:onload:start');
       const startTime = Date.now();
+      await require('second-mate').ready
 
       process.on('unhandledRejection', function(error, promise) {
         console.error(
