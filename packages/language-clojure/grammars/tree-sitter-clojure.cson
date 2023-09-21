@@ -17,6 +17,7 @@ parser: 'tree-sitter-clojure'
   'bb'
   'joke'
   'joker'
+  'edn'
 ]
 'firstLineMatch': '''(?x)
   # Hashbang
@@ -39,5 +40,8 @@ parser: 'tree-sitter-clojure'
 '''
 treeSitter:
   grammar: 'ts/grammar.wasm'
-  highlightsQuery: 'ts/highlights.scm'
+  highlightsQuery: [
+    'ts/highlights.scm'
+    'ts/edn-highlights.scm'
+  ]
   foldsQuery: 'ts/folds.scm'

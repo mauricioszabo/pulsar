@@ -37,7 +37,9 @@
 (def a "A STRING")
   ; <- keyword.control
   ;  ^ entity.global
+  ;    ^ punctuation.definition.string.begin
   ;      ^ string.quoted.double
+  ;             ^ punctuation.definition.string.end
 
 #{'foo}
 ; <- punctuation.section.set.begin
@@ -88,7 +90,7 @@ error/
 ;               ^ meta.symbol
 ;               ^ !entity.name.function
 
-`(call param param# ~(call something))
+`(call param param# ~(call something param#))
 ;  ^ meta.symbol
 ;  ^ entity.name.function
 ;       ^ meta.symbol.syntax-quoted
@@ -97,6 +99,7 @@ error/
 ;                     ^ entity.name.function
 ;                          ^ !meta.syntax-quoted
 ;                          ^ !meta.symbol.syntax-quoted
+;                                    ^ !meta.symbol.generated
 (call param param#)
 ;       ^ !meta.symbol.syntax-quoted
 ;            ^ !meta.symbol.generated
