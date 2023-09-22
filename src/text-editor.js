@@ -15,14 +15,15 @@ const ScopeDescriptor = require('./scope-descriptor');
 
 const TextMateScopeSelector = require('second-mate').ScopeSelector;
 const GutterContainer = require('./gutter-container');
-let TextEditorComponent = null;
-let TextEditorElement = null;
+const TextEditorComponent = require('./text-editor/component');
+const TextEditorElement = require('./text-editor/element');
+
 const {
   isDoubleWidthCharacter,
   isHalfWidthCharacter,
   isKoreanCharacter,
   isWrapBoundary
-} = require('./text-utils');
+} = require('./text-editor/utils');
 
 const SERIALIZATION_VERSION = 1;
 const NON_WHITESPACE_REGEXP = /\S/;
@@ -76,23 +77,14 @@ module.exports = class TextEditor {
   }
 
   static setScheduler(scheduler) {
-    if (TextEditorComponent == null) {
-      TextEditorComponent = require('./text-editor-component');
-    }
     return TextEditorComponent.setScheduler(scheduler);
   }
 
   static didUpdateStyles() {
-    if (TextEditorComponent == null) {
-      TextEditorComponent = require('./text-editor-component');
-    }
     return TextEditorComponent.didUpdateStyles();
   }
 
   static didUpdateScrollbarStyles() {
-    if (TextEditorComponent == null) {
-      TextEditorComponent = require('./text-editor-component');
-    }
     return TextEditorComponent.didUpdateScrollbarStyles();
   }
 
@@ -5293,10 +5285,6 @@ module.exports = class TextEditor {
   // Get the Element for the editor.
   getElement() {
     if (!this.component) {
-      if (!TextEditorComponent)
-        TextEditorComponent = require('./text-editor-component');
-      if (!TextEditorElement)
-        TextEditorElement = require('./text-editor-element');
       this.component = new TextEditorComponent({
         model: this,
         updatedSynchronously: TextEditorElement.prototype.updatedSynchronously,

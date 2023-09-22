@@ -131,11 +131,73 @@ const hasPairedCharacter = string => {
   return false;
 };
 
+function roundToPhysicalPixelBoundary(virtualPixelPosition) {
+  const virtualPixelsPerPhysicalPixel = 1 / window.devicePixelRatio;
+  return (
+    Math.round(virtualPixelPosition / virtualPixelsPerPhysicalPixel) *
+    virtualPixelsPerPhysicalPixel
+  );
+}
+
+function ceilToPhysicalPixelBoundary(virtualPixelPosition) {
+  const virtualPixelsPerPhysicalPixel = 1 / window.devicePixelRatio;
+  return (
+    Math.ceil(virtualPixelPosition / virtualPixelsPerPhysicalPixel) *
+    virtualPixelsPerPhysicalPixel
+  );
+}
+
+function arraysEqual(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0, length = a.length; i < length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function objectsEqual(a, b) {
+  if (!a && b) return false;
+  if (a && !b) return false;
+  if (a && b) {
+    for (const key in a) {
+      if (a[key] !== b[key]) return false;
+    }
+    for (const key in b) {
+      if (a[key] !== b[key]) return false;
+    }
+  }
+  return true;
+}
+
+function constrainRangeToRows(range, startRow, endRow) {
+  if (range.start.row < startRow || range.end.row >= endRow) {
+    range = range.copy();
+    if (range.start.row < startRow) {
+      range.start.row = startRow;
+      range.start.column = 0;
+    }
+    if (range.end.row >= endRow) {
+      range.end.row = endRow;
+      range.end.column = 0;
+    }
+  }
+  return range;
+}
+
+const NBSP_CHARACTER = '\u00a0';
+
 module.exports = {
   isPairedCharacter,
   hasPairedCharacter,
   isDoubleWidthCharacter,
   isHalfWidthCharacter,
   isKoreanCharacter,
-  isWrapBoundary
+  isWrapBoundary,
+  roundToPhysicalPixelBoundary,
+  ceilToPhysicalPixelBoundary,
+  objectsEqual,
+  arraysEqual,
+  constrainRangeToRows,
+  NBSP_CHARACTER
+  // debounce
 };
