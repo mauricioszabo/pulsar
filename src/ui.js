@@ -2,6 +2,8 @@ const path = require("path");
 const fs = require("fs");
 const MarkdownIt = require("markdown-it");
 const { TextEditor } = require("atom");
+const { Matcher } = require("@pulsar-edit/fuzzy-native");
+let yamlFrontMatter, markdownItEmoji, markdownItGitHubHeadings, markdownItTaskCheckbox;
 
 // Helper Markdown Components
 const mdComponents = {
@@ -550,6 +552,34 @@ function convertToDOM(content) {
   return fragment;
 }
 
+function setCandidates(matcherOrCandidates, candidates) {
+  if(candidates) {
+    matcherOrCandidates.setCandidates(
+      [...Array(candidates.length).keys()],
+      candidates
+    );
+    return matcherOrCandidates;
+  } else {
+    return new Matcher(
+      [...Array(matcherOrCandidates.length).keys()],
+      matcherOrCandidates
+    );
+  }
+}
+
+const fuzzyMatcher = {
+  setCandidates: setCandidates,
+
+  score(candidate, query) {
+    return this.match(candidate, query)?.score || 0;
+  },
+
+  match(candidate, query, opts = {}) {
+    const matcher = setCandidates([candidate]);
+    return matcher.match(query, opts)[0];
+  }
+}
+
 function makeAtomEditorNonInteractive(editorElement, preElement) {
   preElement.remove();
   editorElement.setAttributeNode(document.createAttribute("gutter-hidden")); // Hide gutter
@@ -601,4 +631,5 @@ const markdown = {
 
 module.exports = {
   markdown,
+  fuzzyMatcher
 };
