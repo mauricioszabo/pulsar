@@ -2,7 +2,7 @@
   "name": "pulsar",
   "author": "Pulsar-Edit <admin@pulsar-edit.dev>",
   "productName": "Pulsar",
-  "version": "1.115.0-dev",
+  "version": "1.117.0-dev",
   "description": "A Community-led Hyper-Hackable Text Editor",
   "branding": {
     "id": "pulsar",
@@ -23,7 +23,7 @@
     "node": ">=14"
   },
   "license": "MIT",
-  "electronVersion": "29.1.4",
+  "electronVersion": "30.0.9",
   "dependencies": {
     "@atom/source-map-support": "^0.3.4",
     "@babel/core": "7.18.6",
@@ -153,7 +153,7 @@
     "service-hub": "^0.7.4",
     "settings-view": "file:packages/settings-view",
     "sinon": "9.2.1",
-    "snippets": "github:pulsar-edit/snippets#9a7c118",
+    "snippets": "file:./packages/snippets",
     "solarized-dark-syntax": "file:packages/solarized-dark-syntax",
     "solarized-light-syntax": "file:packages/solarized-light-syntax",
     "spell-check": "file:packages/spell-check",
@@ -228,7 +228,7 @@
     "package-generator": "file:./packages/package-generator",
     "pulsar-updater": "file:./packages/pulsar-updater",
     "settings-view": "file:./packages/settings-view",
-    "snippets": "1.7.1",
+    "snippets": "file:./packages/snippets",
     "spell-check": "file:./packages/spell-check",
     "status-bar": "file:./packages/status-bar",
     "styleguide": "file:./packages/styleguide",
@@ -290,7 +290,7 @@
     "@electron/notarize": "^1.2.3",
     "@electron/rebuild": "3.6.0",
     "@playwright/test": "1.22.2",
-    "electron": "29.1.4",
+    "electron": "30.0.9",
     "electron-builder": "23.3.1",
     "eslint": "^8.33.0",
     "eslint-plugin-jsdoc": "^39.7.4",
@@ -302,7 +302,7 @@
     "webdriverio": "7.20.9"
   },
   "resolutions": {
-    "node-abi": "3.56.0",
+    "node-abi": "3.63.0",
     "keytar": "7.9.0",
     "nan": "2.19.0",
     "ctags": "https://github.com/pulsar-edit/node-ctags.git#c32ca6017dd3f4ea314d53b044225505820abbe3",
