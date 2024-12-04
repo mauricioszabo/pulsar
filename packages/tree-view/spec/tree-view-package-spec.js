@@ -3043,7 +3043,9 @@ describe("TreeView", function () {
         fileView.dispatchEvent(new MouseEvent('click', {bubbles: true, detail: 1}));
         treeView.focus();
 
-        spyOn(shell, 'moveItemToTrash').andReturn(promise.reject());
+        spyOn(shell, 'trashItem').andCallFake(() => {
+          return Promise.reject(false);
+        });
 
         spyOn(atom, 'confirm').andCallFake((options, callback) => callback(0));
 
@@ -3205,12 +3207,8 @@ describe("TreeView", function () {
           });
         });
 
-<<<<<<< HEAD
-        it("focuses the directory's parent folder", function () {
-=======
         it("focuses the directory's parent folder", async function () {
           jasmine.useRealClock();
->>>>>>> bce72212de5f12f4846b065f9379151dc23fc515
           const callback = jasmine.createSpy('onEntryDeleted');
           treeView.onEntryDeleted(callback);
           dirView2.dispatchEvent(new MouseEvent('click', {bubbles: true, detail: 1}));
@@ -3225,12 +3223,7 @@ describe("TreeView", function () {
           );
 
           runs(() => {
-<<<<<<< HEAD
-            console.log('most recent', callback.mostRecentCall);
-            expect(root1).toHaveClass('selected')
-=======
             expect(root1).toHaveClass('selected');
->>>>>>> bce72212de5f12f4846b065f9379151dc23fc515
           });
         });
       });
