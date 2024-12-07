@@ -56,8 +56,6 @@ linux_task:
 
 arm_linux_task:
   alias: arm_linux
-  only_if: $CIRRUS_CRON != "" || $CIRRUS_TAG != ""
-  skip: $CIRRUS_CHANGE_IN_REPO == $CIRRUS_LAST_GREEN_CHANGE
   arm_container:
     image: node:16-slim
     memory: 8G
