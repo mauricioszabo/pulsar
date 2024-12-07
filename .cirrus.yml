@@ -55,7 +55,7 @@ linux_task:
       format: junit
 
 arm_linux_task:
-  alias: linux
+  alias: arm_linux
   only_if: $CIRRUS_CRON != "" || $CIRRUS_TAG != ""
   skip: $CIRRUS_CHANGE_IN_REPO == $CIRRUS_LAST_GREEN_CHANGE
   arm_container:
