@@ -822,7 +822,7 @@ class TreeView {
         `Unable to show ${filePath} in ${this.getFileManagerName()}`
       );
     }
-    return shell.showItemInFolder(filePath);
+    return atom.showItemInFolder(filePath);
   }
 
   showCurrentFileInFileManager() {
@@ -834,7 +834,7 @@ class TreeView {
         `Unable to show ${filePath} in ${this.getFileManagerName()}`
       );
     }
-    return shell.showItemInFolder(filePath);
+    return atom.showItemInFolder(filePath);
   }
 
   getFileManagerName() {
@@ -929,7 +929,7 @@ class TreeView {
 
           this.emitter.emit('will-delete-entry', meta);
 
-          let promise = shell.trashItem(selectedPath).then(() => {
+          let promise = atom.trashItem(selectedPath).then(() => {
             this.emitter.emit('entry-deleted', meta);
           }).catch(() => {
             this.emitter.emit('delete-entry-failed', meta);
@@ -973,7 +973,7 @@ class TreeView {
   formatTrashEnabledMessage() {
     switch (process.platform) {
       case 'linux':
-        return 'Is `gvfs-trash` installed?';
+        return 'Do you have permission to delete, and Trash is enabled on the volume where the files are stored?';
       case 'darwin':
         return 'Is Trash enabled on the volume where the files are stored?';
       case 'win32':

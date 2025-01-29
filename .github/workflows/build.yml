@@ -89,11 +89,11 @@ jobs:
 
     - name: Check Pulsar Version
       if: ${{ runner.os != 'Windows' }}
-      run: sed -i -e "s/[0-9]*-dev/`date -u +%Y%m%d%H`-electron-next/g" package.json
+      run: sed -i -e "s/[0-9]*-dev/`date -u +%Y%m%d%H`-next/g" package.json
 
     - name: Check Pulsar Version - Windows
       if: ${{ runner.os == 'Windows' }}
-      run: (Get-Content package.json) -replace '[0-9]*-dev', "$(date -u +%Y%m%d%H)-electron-next" | Set-Content -Path package.json
+      run: (Get-Content package.json) -replace '[0-9]*-dev', "$(date -u +%Y%m%d%H)-next" | Set-Content -Path package.json
 
     - name: Reinstall Current Node-GYP NodeJS Headers
       # Overwrite bad headers that get downloaded.
@@ -239,6 +239,10 @@ jobs:
     needs: build
 
     steps:
+    - name: Install build dependencies - Linux
+      if: ${{ runner.os == 'Linux' }}
+      run: sudo apt-get update && sudo apt-get install -y git python3 python3-pip make gcc g++ libx11-dev libxkbfile-dev pkg-config libsecret-1-dev rpm xvfb ffmpeg zstd wget squashfs-tools
+
     - name: Checkout the latest code
       uses: actions/checkout@v4
 
@@ -274,7 +278,7 @@ jobs:
 
     - name: Check Pulsar Version
       if: ${{ runner.os != 'Windows' }}
-      run: sed -i -e "s/[0-9]*-dev/${TIMESTAMP}-electron-next/g" package.json
+      run: sed -i -e "s/[0-9]*-dev/${TIMESTAMP}-next/g" package.json
       env:
         TIMESTAMP: ${{needs.build.outputs.timestamp}}
 
