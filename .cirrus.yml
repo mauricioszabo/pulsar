@@ -6,7 +6,7 @@ env:
 linux_task:
   alias: linux
   container:
-    image: node:16-slim
+    image: node:20-slim
     memory: 8G
   prepare_script:
     - apt-get update
