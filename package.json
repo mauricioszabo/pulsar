@@ -314,7 +314,7 @@
   },
   "resolutions": {
     "node-abi": "4.12.0",
-    "node-addon-api": "8.3.0",
+    "node-addon-api": "8.4.0",
     "keytar": "7.9.0",
     "nan": "https://github.com/nodejs/nan.git#node23",
     "ctags": "https://github.com/pulsar-edit/node-ctags.git#c32ca6017dd3f4ea314d53b044225505820abbe3",
