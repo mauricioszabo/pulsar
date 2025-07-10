@@ -11,20 +11,6 @@ else
   exit 1
 fi
 
-ATOM_BASE_NAME=$(basename $0)
-ATOM_BASE_NAME=${ATOM_BASE_NAME%.*}
-case $ATOM_BASE_NAME in
-  pulsar-next)
-    CHANNEL=next
-    ;;
-  *)
-    CHANNEL=stable
-    ;;
-esac
-# Capture the name of this script so that we can use it at runtime.
-export ATOM_BASE_NAME
-export ATOM_CHANNEL=$CHANNEL
-
 # Only set the ATOM_DISABLE_SHELLING_OUT_FOR_ENVIRONMENT env var if it hasn't
 # been set.
 if [ -z "$ATOM_DISABLE_SHELLING_OUT_FOR_ENVIRONMENT" ]
@@ -90,13 +76,8 @@ if [ $REDIRECT_STDERR ]; then
   exec 2> /dev/null
 fi
 
-# Keep a different $ATOM_HOME for each release channel.
-if [ -z "$ATOM_HOME" ]
-then
-  ATOM_HOME="$HOME/.${ATOM_BASE_NAME}"
-fi
+ATOM_HOME="${ATOM_HOME:-$HOME/.pulsar}"
 mkdir -p "$ATOM_HOME"
-export ATOM_HOME
 
 if [ $PACKAGE_MODE ]; then
   # If `-p` or `--package` is present, then we'll be discarding all arguments
@@ -116,7 +97,7 @@ if [ $OS == 'Mac' ]; then
   if [ -L "$0" ]; then
     SCRIPT="$(readlink "$0")"
   else
-    SCRIPT="$(realpath "$0")"
+    SCRIPT="$0"
   fi
   ATOM_APP="$(dirname "$(dirname "$(dirname "$SCRIPT")")")"
 
@@ -133,18 +114,10 @@ if [ $OS == 'Mac' ]; then
     ATOM_APP_NAME="$(basename "$ATOM_APP")"
   fi
 
-  if [ -n "${ATOM_APP_NAME}" ]; then
-    # If ATOM_APP_NAME is known, use it as the executable name
-    ATOM_EXECUTABLE_NAME="${ATOM_APP_NAME%.*}"
-  else
-    # Else choose it from the inferred channel name
-    if [ "$CHANNEL" == 'next' ]; then
-      ATOM_EXECUTABLE_NAME="PulsarNext"
-    else
-      ATOM_EXECUTABLE_NAME="Pulsar"
-    fi
-    ATOM_APP_NAME="${ATOM_EXECUTABLE_NAME}.app"
-  fi
+  # Fall back to the default Pulsar.app as the app name.
+  ATOM_APP_NAME=${ATOM_APP_NAME:-Pulsar.app}
+  # The executable name will be the same thing but without the `.app` suffix.
+  ATOM_EXECUTABLE_NAME="${ATOM_APP_NAME%.*}"
 
   if [ -z "${PULSAR_PATH}" ]; then
     # If PULSAR_PATH isn't set, check /Applications and then ~/Applications for
@@ -154,9 +127,9 @@ if [ $OS == 'Mac' ]; then
     elif [ -x "$HOME/Applications/${ATOM_APP_NAME}" ]; then
       PULSAR_PATH="$HOME/Applications"
     else
-      # We still haven't found it. Let's try searching for it via
+      # We still haven't found a Pulsar.app. Let's try searching for it via
       # Spotlight.
-      PULSAR_APP_SEARCH_RESULT="$(mdfind "kMDItemCFBundleIdentifier == 'dev.pulsar-edit.${BASENAME}'" | grep -v ShipIt | head -1)"
+      PULSAR_APP_SEARCH_RESULT="$(mdfind "kMDItemCFBundleIdentifier == 'dev.pulsar-edit.pulsar'" | grep -v ShipIt | head -1)"
       if [ ! -z "$PULSAR_APP_SEARCH_RESULT" ]; then
         PULSAR_PATH="$(dirname "$PULSAR_APP_SEARCH_RESULT")"
         ATOM_APP_NAME="$(basename "$PULSAR_APP_SEARCH_RESULT")"
@@ -196,19 +169,7 @@ elif [ $OS == 'Linux' ]; then
   # Set tmpdir only if it's unset.
   : ${TMPDIR:=/tmp}
 
-  # We think that
-  #
-  # * `ATOM_APP_NAME` will refer to the human-readable app name (“Pulsar” or
-  #   “PulsarNext”)
-  # * `ATOM_EXECUTABLE_NAME` will refer to the executable we must run to launch
-  #   it (`pulsar` or `pulsar-next`)
-
-  ATOM_EXECUTABLE_NAME=$ATOM_BASE_NAME
-  if [ "$CHANNEL" == 'next' ]; then
-    ATOM_APP_NAME="PulsarNext"
-  else
-    ATOM_APP_NAME="Pulsar"
-  fi
+  ATOM_EXECUTABLE_NAME="pulsar"
 
   # If `PULSAR_PATH` is set by the user, we'll assume they know what they're
   # doing. Otherwise we should try to find it ourselves.
@@ -228,7 +189,7 @@ elif [ $OS == 'Linux' ]; then
     ATOM_APP="$(dirname "$(dirname "$SCRIPT")")"
     PULSAR_PATH="$(realpath "$ATOM_APP")"
 
-    if [ ! -f "$PULSAR_PATH/${ATOM_EXECUTABLE_NAME}" ]; then
+    if [ ! -f "$PULSAR_PATH/pulsar" ]; then
       # If that path doesn't contain a `pulsar` executable, then it's not a
       # valid path. We'll try something else.
       unset ATOM_APP
@@ -236,35 +197,22 @@ elif [ $OS == 'Linux' ]; then
     fi
 
     if [ -z "${PULSAR_PATH}" ]; then
-      if [ -f "/opt/${ATOM_APP_NAME}/${ATOM_EXECUTABLE_NAME}" ]; then
+      if [ -f "/opt/Pulsar/pulsar" ]; then
         # Check the default installation directory for RPM and DEB
         # distributions.
-        PULSAR_PATH="/opt/${ATOM_APP_NAME}"
-      elif [ -f "$TMPDIR/pulsar-build/${ATOM_APP_NAME}/${ATOM_EXECUTABLE_NAME}" ]; then
+        PULSAR_PATH="/opt/Pulsar"
+      elif [ -f "$TMPDIR/pulsar-build/Pulsar/pulsar" ]; then
         # This is where Pulsar can be found during some CI build tasks.
-        PULSAR_PATH="$TMPDIR/pulsar-build/${ATOM_APP_NAME}"
+        PULSAR_PATH="$TMPDIR/pulsar-build/Pulsar"
       else
-        echoerr "Cannot locate ${ATOM_APP_NAME}. Set the PULSAR_PATH environment variable to the directory containing the \`${ATOM_BASE_NAME}\` executable."
+        echoerr "Cannot locate Pulsar. Set the PULSAR_PATH environment variable to the directory containing the \`pulsar\` executable."
         exit 1
       fi
     fi
   fi
 
   PULSAR_EXECUTABLE="$PULSAR_PATH/$ATOM_EXECUTABLE_NAME"
-
-  # The name of the `ppm` binary we should run will be named according to the
-  # same convention as this script; that's how PPM itself knows which release
-  # channel it's using.
-  case $ATOM_BASE_NAME in
-    pulsar-next)
-      PPM_EXECUTABLE_NAME="ppm-next"
-      ;;
-    *)
-      PPM_EXECUTABLE_NAME="ppm"
-      ;;
-  esac
-
-  PPM_EXECUTABLE="$PULSAR_PATH/resources/app/ppm/bin/$PPM_EXECUTABLE_NAME"
+  PPM_EXECUTABLE="$PULSAR_PATH/resources/app/ppm/bin/ppm"
 
   # If `-p` or `--package` was specified, call `ppm` with all the arguments
   # that followed it instead of calling the Pulsar executable directly.
@@ -282,8 +230,12 @@ elif [ $OS == 'Linux' ]; then
       exit ${ATOM_EXIT}
     fi
   else
+    EXTRA_ARGS='--no-sandbox'
+    if [ -n "$WAYLAND_DISPLAY" ]; then
+      EXTRA_ARGS="$EXTRA_ARGS --enable-features=UseOzonePlatform --ozone-platform=wayland"
+    fi
     (
-    nohup "$PULSAR_EXECUTABLE" --executed-from="$(pwd)" --pid=$$ "$@" --no-sandbox > "$ATOM_HOME/nohup.out" 2>&1
+    nohup "$PULSAR_EXECUTABLE" $EXTRA_ARGS --executed-from="$(pwd)" --pid=$$ "$@" > "$ATOM_HOME/nohup.out" 2>&1
     if [ $? -ne 0 ]; then
       cat "$ATOM_HOME/nohup.out"
       exit $?
