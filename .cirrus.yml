@@ -179,7 +179,7 @@ silicon_mac_task:
     - mkdir tj_n && cd tj_n
     - curl -L https://github.com/tj/n/archive/0ce85771fdff8f4b3e09ade700461b4f58a64444.tar.gz -O
     - tar xf 0ce85771fdff8f4b3e09ade700461b4f58a64444.tar.gz
-    - sudo bash ./n-0ce85771fdff8f4b3e09ade700461b4f58a64444/bin/n 16
+    - sudo bash ./n-0ce85771fdff8f4b3e09ade700461b4f58a64444/bin/n 20
     - cd ..
     - sudo npm install -g yarn
     - sed -i -e "s/[0-9]*-dev/`date -u +%Y%m%d%H`/g" package.json
