@@ -6,7 +6,7 @@ env:
 # linux_task:
 #   alias: linux
 #   container:
-#     image: node:16-slim
+#     image: node:20-buster-slim
 #     memory: 8G
 #   prepare_script:
 #     - apt-get update
@@ -59,7 +59,7 @@ arm_linux_task:
   only_if: $CIRRUS_CRON != "" || $CIRRUS_TAG != ""
   skip: $CIRRUS_CHANGE_IN_REPO == $CIRRUS_LAST_GREEN_CHANGE
   arm_container:
-    image: node:16-slim
+    image: node:20-buster-slim
     memory: 8G
   env:
     USE_SYSTEM_FPM: 'true'
@@ -179,7 +179,7 @@ silicon_mac_task:
     - mkdir tj_n && cd tj_n
     - curl -L https://github.com/tj/n/archive/0ce85771fdff8f4b3e09ade700461b4f58a64444.tar.gz -O
     - tar xf 0ce85771fdff8f4b3e09ade700461b4f58a64444.tar.gz
-    - sudo bash ./n-0ce85771fdff8f4b3e09ade700461b4f58a64444/bin/n 16
+    - sudo bash ./n-0ce85771fdff8f4b3e09ade700461b4f58a64444/bin/n 20
     - cd ..
     - sudo npm install -g yarn
     - sed -i -e "s/[0-9]*-dev/`date -u +%Y%m%d%H`/g" package.json
