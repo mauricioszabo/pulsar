@@ -3,6 +3,7 @@ const { Point, Range } = require('@pulsar-edit/text-buffer');
 const LineTopIndex = require('line-top-index');
 const TextEditor = require('./text-editor');
 const { isPairedCharacter, hasRtlText } = require('./text-utils');
+const { walkScreenLineTags } = require('./screen-line-tag-walker');
 const electron = require('electron');
 const clipboard = electron.clipboard;
 const $ = etch.dom;
@@ -19,6 +20,14 @@ const ZERO_WIDTH_NBSP_CHARACTER = '\ufeff';
 const MOUSE_DRAG_AUTOSCROLL_MARGIN = 40;
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;
+// Lines longer than this trigger column-range virtualization: only the
+// portion of the line currently visible horizontally is materialized in the
+// DOM. Chosen to match the highlighting limit already used by the Tree-sitter
+// language mode (`LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING`).
+const LONG_LINE_VIRTUALIZATION_THRESHOLD = 10000;
+// Extra columns rendered on each side of the visible viewport so wider-than-
+// average characters and partial scrolls do not reveal blank gutters.
+const LONG_LINE_VIRTUALIZATION_OVERSCAN = 64;
 
 function scaleMouseDragAutoscrollDelta(delta) {
   return Math.pow(delta / 3, 3) / 280;
@@ -650,6 +659,7 @@ module.exports = class TextEditorComponent {
       const endRow = this.getRenderedEndRow();
       const rowsPerTile = this.getRowsPerTile();
       const tileWidth = this.getScrollWidth();
+      const visibleColumnRange = this.getVisibleColumnRangeForLongLines();
 
       for (let i = 0; i < this.renderedTileStartRows.length; i++) {
         const tileStartRow = this.renderedTileStartRows[i];
@@ -682,6 +692,7 @@ module.exports = class TextEditorComponent {
               tileEndRow - startRow
             ),
             blockDecorations: this.decorationsToRender.blocks.get(tileStartRow),
+            visibleColumnRange,
             displayLayer: this.props.model.displayLayer,
             nodePool: this.lineNodesPool,
             lineComponentsByScreenLineId
@@ -3235,6 +3246,26 @@ module.exports = class TextEditorComponent {
     return this.measurements.baseCharacterWidth;
   }
 
+  // Returns the [startColumn, endColumn] window of columns that need to be
+  // materialized in the DOM for lines longer than
+  // `LONG_LINE_VIRTUALIZATION_THRESHOLD`. Shorter lines ignore this and render
+  // their full text. Returns `null` when measurements are not yet available
+  // (in which case lines render fully and re-render once measured).
+  getVisibleColumnRangeForLongLines() {
+    const charWidth = this.getBaseCharacterWidth();
+    if (!charWidth) return null;
+    const scrollLeft = this.getScrollLeft();
+    const containerWidth = this.getScrollContainerClientWidth();
+    const startColumn = Math.max(
+      0,
+      Math.floor(scrollLeft / charWidth) - LONG_LINE_VIRTUALIZATION_OVERSCAN
+    );
+    const endColumn =
+      Math.ceil((scrollLeft + containerWidth) / charWidth) +
+      LONG_LINE_VIRTUALIZATION_OVERSCAN;
+    return [startColumn, endColumn];
+  }
+
   getLongestLineWidth() {
     return this.measurements.longestLineWidth;
   }
@@ -4532,6 +4563,7 @@ class LinesTileComponent {
         screenRow: tileStartRow + i,
         lineDecoration: lineDecorations[i],
         textDecorations: textDecorations[i],
+        visibleColumnRange: this.props.visibleColumnRange,
         displayLayer,
         nodePool,
         lineComponentsByScreenLineId
@@ -4573,6 +4605,7 @@ class LinesTileComponent {
           screenRow: tileStartRow + newScreenLineIndex,
           lineDecoration: lineDecorations[newScreenLineIndex],
           textDecorations: textDecorations[newScreenLineIndex],
+          visibleColumnRange: this.props.visibleColumnRange,
           displayLayer,
           nodePool,
           lineComponentsByScreenLineId
@@ -4590,9 +4623,11 @@ class LinesTileComponent {
       } else if (oldScreenLine === newScreenLine) {
         const lineComponent = this.lineComponents[lineComponentIndex];
         lineComponent.update({
+          screenLine: newScreenLine,
           screenRow: tileStartRow + newScreenLineIndex,
           lineDecoration: lineDecorations[newScreenLineIndex],
-          textDecorations: textDecorations[newScreenLineIndex]
+          textDecorations: textDecorations[newScreenLineIndex],
+          visibleColumnRange: this.props.visibleColumnRange
         });
 
         oldScreenLineIndex++;
@@ -4617,6 +4652,7 @@ class LinesTileComponent {
               screenRow: tileStartRow + newScreenLineIndex,
               lineDecoration: lineDecorations[newScreenLineIndex],
               textDecorations: textDecorations[newScreenLineIndex],
+              visibleColumnRange: this.props.visibleColumnRange,
               displayLayer,
               nodePool,
               lineComponentsByScreenLineId
@@ -4657,6 +4693,7 @@ class LinesTileComponent {
             screenRow: tileStartRow + newScreenLineIndex,
             lineDecoration: lineDecorations[newScreenLineIndex],
             textDecorations: textDecorations[newScreenLineIndex],
+            visibleColumnRange: this.props.visibleColumnRange,
             displayLayer,
             nodePool,
             lineComponentsByScreenLineId
@@ -4767,6 +4804,16 @@ class LinesTileComponent {
     }
   }
 
+  tileContainsLongLine() {
+    const screenLines = this.props.screenLines;
+    if (!screenLines) return false;
+    for (let i = 0; i < screenLines.length; i++) {
+      if (screenLines[i].lineText.length >= LONG_LINE_VIRTUALIZATION_THRESHOLD)
+        return true;
+    }
+    return false;
+  }
+
   shouldUpdate(newProps) {
     const oldProps = this.props;
     if (oldProps.top !== newProps.top) return true;
@@ -4777,6 +4824,14 @@ class LinesTileComponent {
     if (oldProps.tileEndRow !== newProps.tileEndRow) return true;
     if (!arraysEqual(oldProps.screenLines, newProps.screenLines)) return true;
     if (!arraysEqual(oldProps.lineDecorations, newProps.lineDecorations))
+      return true;
+    if (
+      this.tileContainsLongLine() &&
+      !visibleColumnRangesEqual(
+        oldProps.visibleColumnRange,
+        newProps.visibleColumnRange
+      )
+    )
       return true;
 
     if (oldProps.blockDecorations && newProps.blockDecorations) {
@@ -4859,16 +4914,30 @@ class LineComponent {
       this.element.dataset.screenRow = newProps.screenRow;
     }
 
-    if (
-      !textDecorationsEqual(
-        this.props.textDecorations,
-        newProps.textDecorations
-      )
-    ) {
+    const textDecorationsChanged = !textDecorationsEqual(
+      this.props.textDecorations,
+      newProps.textDecorations
+    );
+    const visibleRangeChanged =
+      this.shouldVirtualize(newProps) &&
+      !visibleColumnRangesEqual(
+        this.props.visibleColumnRange,
+        newProps.visibleColumnRange
+      );
+
+    if (textDecorationsChanged || visibleRangeChanged) {
       this.props.textDecorations = newProps.textDecorations;
+      this.props.visibleColumnRange = newProps.visibleColumnRange;
       this.element.firstChild.remove();
       this.appendContents();
     }
+  }
+
+  shouldVirtualize(props) {
+    return (
+      props.visibleColumnRange != null &&
+      props.screenLine.lineText.length >= LONG_LINE_VIRTUALIZATION_THRESHOLD
+    );
   }
 
   destroy() {
@@ -4883,78 +4952,81 @@ class LineComponent {
   }
 
   appendContents() {
-    const { displayLayer, nodePool, screenLine, textDecorations } = this.props;
+    const {
+      displayLayer,
+      nodePool,
+      screenLine,
+      screenRow,
+      textDecorations
+    } = this.props;
 
     this.textNodes.length = 0;
 
-    const { lineText, tags } = screenLine;
     let openScopeNode = nodePool.getElement('SPAN', null, null);
     this.element.appendChild(openScopeNode);
 
-    let decorationIndex = 0;
-    let column = 0;
-    let activeClassName = null;
-    let activeStyle = null;
-    let nextDecoration = textDecorations
-      ? textDecorations[decorationIndex]
-      : null;
-    if (nextDecoration && nextDecoration.column === 0) {
-      column = nextDecoration.column;
-      activeClassName = nextDecoration.className;
-      activeStyle = nextDecoration.style;
-      nextDecoration = textDecorations[++decorationIndex];
-    }
+    const onOpenScope = className => {
+      const newScopeNode = nodePool.getElement('SPAN', className, null);
+      openScopeNode.appendChild(newScopeNode);
+      openScopeNode = newScopeNode;
+    };
+    const onCloseScope = () => {
+      openScopeNode = openScopeNode.parentElement;
+    };
+    const onTextRun = (text, decorationClassName, decorationStyle) => {
+      this.appendTextNode(
+        openScopeNode,
+        text,
+        decorationClassName,
+        decorationStyle
+      );
+    };
 
-    for (let i = 0; i < tags.length; i++) {
-      const tag = tags[i];
-      if (tag !== 0) {
-        if (displayLayer.isCloseTag(tag)) {
-          openScopeNode = openScopeNode.parentElement;
-        } else if (displayLayer.isOpenTag(tag)) {
-          const newScopeNode = nodePool.getElement(
-            'SPAN',
-            displayLayer.classNameForTag(tag),
-            null
-          );
-          openScopeNode.appendChild(newScopeNode);
-          openScopeNode = newScopeNode;
-        } else {
-          const nextTokenColumn = column + tag;
-          while (nextDecoration && nextDecoration.column <= nextTokenColumn) {
-            const text = lineText.substring(column, nextDecoration.column);
-            this.appendTextNode(
-              openScopeNode,
-              text,
-              activeClassName,
-              activeStyle
-            );
-            column = nextDecoration.column;
-            activeClassName = nextDecoration.className;
-            activeStyle = nextDecoration.style;
-            nextDecoration = textDecorations[++decorationIndex];
-          }
-
-          if (column < nextTokenColumn) {
-            const text = lineText.substring(column, nextTokenColumn);
-            this.appendTextNode(
-              openScopeNode,
-              text,
-              activeClassName,
-              activeStyle
-            );
-            column = nextTokenColumn;
-          }
-        }
+    const virtualize = this.shouldVirtualize(this.props);
+    let walkArgs;
+    if (virtualize && typeof displayLayer.getScreenLineTokens === 'function') {
+      // Optional fast path: language mode supplied a pre-windowed tag stream.
+      const [startCol, endCol] = this.props.visibleColumnRange;
+      const windowed = displayLayer.getScreenLineTokens(
+        screenRow,
+        startCol,
+        endCol
+      );
+      if (windowed) {
+        walkArgs = {
+          tags: windowed.tags,
+          lineText: windowed.lineText,
+          displayLayer,
+          textDecorations,
+          initialScopes: windowed.openScopes,
+          onOpenScope,
+          onCloseScope,
+          onTextRun
+        };
       }
     }
+    if (!walkArgs) {
+      walkArgs = {
+        tags: screenLine.tags,
+        lineText: screenLine.lineText,
+        displayLayer,
+        textDecorations,
+        visibleColumnRange: virtualize ? this.props.visibleColumnRange : null,
+        onOpenScope,
+        onCloseScope,
+        onTextRun
+      };
+    }
 
-    if (column === 0) {
+    const totalColumn = walkScreenLineTags(walkArgs);
+
+    if (totalColumn === 0) {
       const textNode = nodePool.getTextNode(' ');
       this.element.appendChild(textNode);
       this.textNodes.push(textNode);
     }
 
-    if (lineText.endsWith(displayLayer.foldCharacter)) {
+    if (screenLine.lineText.endsWith(displayLayer.foldCharacter)) {
       // Insert a zero-width non-breaking whitespace, so that LinesYardstick can
       // take the fold-marker::after pseudo-element into account during
       // measurements when such marker is the last character on the line.
@@ -5523,6 +5595,12 @@ function arraysEqual(a, b) {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function visibleColumnRangesEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a[0] === b[0] && a[1] === b[1];
 }
 
 function objectsEqual(a, b) {
