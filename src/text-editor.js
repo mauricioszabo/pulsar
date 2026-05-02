@@ -5305,11 +5305,22 @@ module.exports = class TextEditor {
   // Get the Element for the editor.
   getElement() {
     if (!this.component) {
-      if (!TextEditorComponent)
-        TextEditorComponent = require('./text-editor-component');
+      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
+      // the experimental SolidJS-based implementation under
+      // `src/pulsar-text-editor/`. This is the model-driven creation
+      // path; the parallel path in text-editor-element.js#getComponent
+      // honors the same flag.
+      const useNew =
+        global.atom &&
+        global.atom.config &&
+        global.atom.config.get('core.useNewTextEditor') === true;
+      const ComponentClass = useNew
+        ? require('./pulsar-text-editor')
+        : (TextEditorComponent ||
+            (TextEditorComponent = require('./text-editor-component')));
       if (!TextEditorElement)
         TextEditorElement = require('./text-editor-element');
-      this.component = new TextEditorComponent({
+      this.component = new ComponentClass({
         model: this,
         updatedSynchronously: TextEditorElement.prototype.updatedSynchronously,
         initialScrollTopRow: this.initialScrollTopRow,
