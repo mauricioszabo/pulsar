@@ -18,9 +18,29 @@ let plugins = [];
 // the codebase keeps the existing transform pipeline unchanged. Matches the
 // legacy `text-editor-component.js` and anything under `src/pulsar-text-editor/`
 // (the new SolidJS implementation, gated by the `core.useNewTextEditor` flag).
+//
+// `generate: 'dom'` (the preset default, made explicit) selects client-side
+// rendering output instead of SSR string generation.
+//
+// `moduleName: 'solid-js/web/dist/web.cjs'` is the Electron workaround:
+// solid-js's `package.json` `exports` field maps the `node` condition (which
+// Electron's renderer matches when `require()`ing) to the SSR build, so the
+// bare specifier `solid-js/web` would resolve to a `server.cjs` whose
+// runtime helpers throw "Client-only API called on the server side" the
+// moment a `render()` happens. Pointing the preset at the client `.cjs`
+// directly bypasses the conditional resolution and is stable across patch
+// releases of solid-js 1.9.x.
 let solidOverride = {
   test: [/text-editor-component\.js$/, /[\\/]pulsar-text-editor[\\/]/],
-  presets: ['babel-preset-solid']
+  presets: [
+    [
+      'babel-preset-solid',
+      {
+        generate: 'dom',
+        moduleName: 'solid-js/web/dist/web.cjs'
+      }
+    ]
+  ]
 };
 
 module.exports = {
