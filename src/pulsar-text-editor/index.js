@@ -26,16 +26,19 @@
 //   the import → require transform from babel-preset-atomic. If this
 //   file evaluates without throwing, the preset stack is wired up.
 
-// IMPORTANT: import from `solid-js/web/dist/web.cjs` directly, not from
-// `solid-js/web`. Solid's package.json `exports` field maps the `node`
-// condition to the SSR build (`server.cjs`), and Electron's renderer
-// process reports as Node when `require()` runs — so the bare specifier
-// gives us a server build that throws "Client-only API called on the
-// server side" the moment we call `render`. The dist filename is part
-// of Solid's published layout (1.9.x) and is stable across patch
-// releases of that minor.
-import { render } from 'solid-js/web/dist/web.cjs';
-import { createSignal, onCleanup } from 'solid-js';
+// Install the loader shim BEFORE anything pulls in solid-js or
+// solid-js/web (directly or transitively). The shim rewrites those
+// bare specifiers to point at Solid's client `.cjs` builds; without
+// it, Electron's renderer matches the `node` condition on Solid's
+// `exports` map and ends up with the SSR scheduler, which makes
+// signals appear to update but never re-runs reactive effects.
+// Source-ordered `require()` is used (rather than ES `import`) so
+// the modules-to-CommonJS transform doesn't hoist solid above the
+// shim. See ./solid-loader-shim.js for the full rationale.
+require('./solid-loader-shim');
+
+const { render } = require('solid-js/web');
+const { createSignal, onCleanup } = require('solid-js');
 
 let TextEditor = null;
 let TextEditorElement = null;
