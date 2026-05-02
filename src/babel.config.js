@@ -13,9 +13,18 @@ let presets = [
 
 let plugins = [];
 
+// Files that opt into the SolidJS JSX transform via `babel-preset-solid`.
+// Scoped here (rather than added to the global preset list) so the rest of
+// the codebase keeps the existing transform pipeline unchanged.
+let solidOverride = {
+  test: [/text-editor-component\.js$/],
+  presets: ['babel-preset-solid']
+};
+
 module.exports = {
   presets: presets,
   plugins: plugins,
+  overrides: [solidOverride],
   exclude: 'node_modules/**',
   sourceMap: 'inline'
 };
