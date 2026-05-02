@@ -76,19 +76,54 @@ class PulsarTextEditorComponent {
     this.scrollTop = 0;
     this.scrollLeft = 0;
 
+    // Some `<atom-text-editor>` elements are created with prior children
+    // (e.g. an `initialText` text node from `textContent`). Clear them so
+    // the placeholder is the only thing rendered.
+    while (this.element.firstChild) {
+      this.element.removeChild(this.element.firstChild);
+    }
+
     this.hiddenInput = document.createElement('input');
     this.hiddenInput.classList.add('hidden-input');
     this.hiddenInput.setAttribute('tabindex', '-1');
+    this.hiddenInput.style.cssText =
+      'position: absolute; width: 1px; height: 1px; opacity: 0;';
 
     this.placeholder = document.createElement('div');
     this.placeholder.classList.add('pulsar-text-editor-placeholder');
-    this.placeholder.style.cssText =
-      'padding: 1em; font-family: monospace; opacity: 0.7;';
+    // Inline styles deliberately heavy-handed so the scaffold is visible
+    // regardless of whatever theme rules apply to `<atom-text-editor>`
+    // descendants. Will be removed in a later commit.
+    this.placeholder.style.cssText = [
+      'display: block',
+      'box-sizing: border-box',
+      'width: 100%',
+      'height: 100%',
+      'min-height: 4em',
+      'padding: 1em',
+      'background: #2a1414',
+      'color: #ff8a8a',
+      'font-family: monospace',
+      'font-size: 14px',
+      'border: 2px dashed #ff5252',
+      'white-space: pre-wrap',
+      'overflow: auto'
+    ].join('; ') + ';';
     this.placeholder.textContent =
-      'New SolidJS text editor (experimental scaffold). Rendering not yet implemented.';
+      '[pulsar-text-editor] new SolidJS text editor (experimental scaffold).\n' +
+      'Rendering not yet implemented. core.useNewTextEditor is ON.';
 
     this.element.appendChild(this.hiddenInput);
     this.element.appendChild(this.placeholder);
+
+    // Diagnostic — visible in DevTools (Cmd/Ctrl+Alt+I) so we can confirm
+    // the swap fires. Remove once rendering lands.
+    // eslint-disable-next-line no-console
+    console.info(
+      '[pulsar-text-editor] mounted on',
+      this.element,
+      '(model:', this.props.model && this.props.model.id, ')'
+    );
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
