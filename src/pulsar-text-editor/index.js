@@ -1,33 +1,81 @@
+'use babel';
+
 // New SolidJS-based TextEditorComponent (scaffold).
 //
 // This file is the entry point for the experimental text editor
 // implementation gated behind the `core.useNewTextEditor` config flag.
-// Right now it is a *stub*: every public method returns a reasonable
+// Right now most public methods are *stubs*: they return a reasonable
 // default so external callers (text-editor.js, text-editor-element.js,
 // downstream packages) do not crash when the flag is on. The legacy
 // Etch implementation at src/text-editor-component.js remains the
 // default and is not modified.
 //
 // See docs/decisions/006-replace-etch-text-editor-with-solidjs.md for
-// the migration plan. Subsequent commits will replace these stubs with
-// real SolidJS components.
+// the migration plan. Subsequent commits will replace the placeholder
+// rendering below with real SolidJS components for lines, gutters,
+// cursors, etc.
 //
 // Authoring notes:
-// - This file is plain JS so Commit A does not depend on the
-//   `solid-js` / `babel-preset-solid` packages being installed yet.
-//   When real Solid components land in a follow-up commit, this file
-//   (or a sibling file under this directory) will get a `'use babel'`
-//   header so Pulsar's Babel pipeline picks up `babel-preset-solid`.
-// - The Babel `overrides` entry in src/babel.config.js already covers
-//   anything under `src/pulsar-text-editor/`.
+// - This file uses JSX. The `'use babel'` header above triggers
+//   Pulsar's per-file Babel pipeline (see src/babel.js); the
+//   `overrides` entry in src/babel.config.js applies
+//   `babel-preset-solid` to anything under `src/pulsar-text-editor/`,
+//   so JSX becomes Solid template clones + reactive bindings at load
+//   time. There is no separate build step.
+// - We deliberately use ES imports here so Babel is also exercising
+//   the import → require transform from babel-preset-atomic. If this
+//   file evaluates without throwing, the preset stack is wired up.
 
-'use strict';
+import { render } from 'solid-js/web';
+import { createSignal, onCleanup } from 'solid-js';
 
 let TextEditor = null;
 let TextEditorElement = null;
 
+// --- Solid placeholder component ----------------------------------------
+
+// Reactive ticker so we can visually confirm Solid signals and DOM
+// bindings are alive: the number on screen should increment once per
+// second. Removed once the real renderer lands.
+function ScaffoldPlaceholder(props) {
+  const [tick, setTick] = createSignal(0);
+  const intervalId = setInterval(() => setTick(t => t + 1), 1000);
+  onCleanup(() => clearInterval(intervalId));
+
+  const containerStyle = [
+    'display: block',
+    'box-sizing: border-box',
+    'width: 100%',
+    'height: 100%',
+    'min-height: 4em',
+    'padding: 1em',
+    'background: #2a1414',
+    'color: #ff8a8a',
+    'font-family: monospace',
+    'font-size: 14px',
+    'border: 2px dashed #ff5252',
+    'white-space: pre-wrap',
+    'overflow: auto'
+  ].join('; ') + ';';
+
+  return (
+    <div class="pulsar-text-editor-placeholder" style={containerStyle}>
+      <div>[pulsar-text-editor] new SolidJS text editor (experimental scaffold).</div>
+      <div>Rendering not yet implemented. core.useNewTextEditor is ON.</div>
+      <div>
+        Solid signal tick: <strong>{tick()}s</strong>
+        {' '}— if this number is changing, JSX → Babel → Solid → reactive DOM
+        is working end to end.
+      </div>
+      <div>Model id: {props.modelId}</div>
+    </div>
+  );
+}
+
+// --- Component class ----------------------------------------------------
+
 class PulsarTextEditorComponent {
-  // --- Static API ---------------------------------------------------------
+  // --- Static API -------------------------------------------------------
 
   // Deprecated no-ops kept for ABI compatibility. Solid has no central
   // scheduler; batching happens via Solid's `batch()` invoked from
@@ -47,7 +95,7 @@ class PulsarTextEditorComponent {
     }
   }
 
-  // --- Construction -------------------------------------------------------
+  // --- Construction -----------------------------------------------------
 
   constructor(props) {
     this.props = props || {};
@@ -76,9 +124,9 @@ class PulsarTextEditorComponent {
     this.scrollTop = 0;
     this.scrollLeft = 0;
 
-    // Some `<atom-text-editor>` elements are created with prior children
-    // (e.g. an `initialText` text node from `textContent`). Clear them so
-    // the placeholder is the only thing rendered.
+    // `<atom-text-editor>` may be created with prior children (e.g. an
+    // `initialText` text node from `textContent`). Clear them so the
+    // Solid root has a clean container.
     while (this.element.firstChild) {
       this.element.removeChild(this.element.firstChild);
     }
@@ -88,48 +136,33 @@ class PulsarTextEditorComponent {
     this.hiddenInput.setAttribute('tabindex', '-1');
     this.hiddenInput.style.cssText =
       'position: absolute; width: 1px; height: 1px; opacity: 0;';
-
-    this.placeholder = document.createElement('div');
-    this.placeholder.classList.add('pulsar-text-editor-placeholder');
-    // Inline styles deliberately heavy-handed so the scaffold is visible
-    // regardless of whatever theme rules apply to `<atom-text-editor>`
-    // descendants. Will be removed in a later commit.
-    this.placeholder.style.cssText = [
-      'display: block',
-      'box-sizing: border-box',
-      'width: 100%',
-      'height: 100%',
-      'min-height: 4em',
-      'padding: 1em',
-      'background: #2a1414',
-      'color: #ff8a8a',
-      'font-family: monospace',
-      'font-size: 14px',
-      'border: 2px dashed #ff5252',
-      'white-space: pre-wrap',
-      'overflow: auto'
-    ].join('; ') + ';';
-    this.placeholder.textContent =
-      '[pulsar-text-editor] new SolidJS text editor (experimental scaffold).\n' +
-      'Rendering not yet implemented. core.useNewTextEditor is ON.';
-
     this.element.appendChild(this.hiddenInput);
-    this.element.appendChild(this.placeholder);
 
-    // Diagnostic — visible in DevTools (Cmd/Ctrl+Alt+I) so we can confirm
-    // the swap fires. Remove once rendering lands.
-    // eslint-disable-next-line no-console
-    console.info(
-      '[pulsar-text-editor] mounted on',
-      this.element,
-      '(model:', this.props.model && this.props.model.id, ')'
+    this.solidHost = document.createElement('div');
+    this.solidHost.classList.add('pulsar-text-editor-solid-host');
+    this.solidHost.style.cssText = 'display: block; width: 100%; height: 100%;';
+    this.element.appendChild(this.solidHost);
+
+    const modelId = this.props.model && this.props.model.id;
+    this.disposeRender = render(
+      () => <ScaffoldPlaceholder modelId={modelId} />,
+      this.solidHost
     );
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
+
+    // Diagnostic — visible in DevTools so we can confirm the swap fires
+    // and the Solid mount succeeded. Remove once rendering lands.
+    // eslint-disable-next-line no-console
+    console.info(
+      '[pulsar-text-editor] mounted on',
+      this.element,
+      '(model:', modelId, ')'
+    );
   }
 
-  // --- Update / lifecycle -------------------------------------------------
+  // --- Update / lifecycle -----------------------------------------------
 
   update(props) {
     this.props = Object.assign({}, this.props, props);
@@ -161,6 +194,10 @@ class PulsarTextEditorComponent {
     if (PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents.delete(this);
     }
+    if (this.disposeRender) {
+      this.disposeRender();
+      this.disposeRender = null;
+    }
   }
 
   didShow() { this.visible = true; }
@@ -171,7 +208,7 @@ class PulsarTextEditorComponent {
   didUpdateStyles() {}
   didUpdateScrollbarStyles() {}
 
-  // --- Model-driven callbacks (called from text-editor.js) ----------------
+  // --- Model-driven callbacks (called from text-editor.js) --------------
 
   didChangeDisplayLayer(_changes) {}
   didResetDisplayLayer() {}
@@ -182,7 +219,7 @@ class PulsarTextEditorComponent {
   addBlockDecoration(_decoration) {}
   invalidateBlockDecorationDimensions() {}
 
-  // --- Position / measurement queries -------------------------------------
+  // --- Position / measurement queries -----------------------------------
 
   pixelPositionForScreenPosition(_screenPosition) {
     return { top: 0, left: 0 };
@@ -203,7 +240,7 @@ class PulsarTextEditorComponent {
 
   measureDimensions() {}
 
-  // --- Dimensions ---------------------------------------------------------
+  // --- Dimensions -------------------------------------------------------
 
   getLineHeight() { return 0; }
   getBaseCharacterWidth() { return 0; }
@@ -222,7 +259,7 @@ class PulsarTextEditorComponent {
 
   getGutterContainerWidth() { return 0; }
 
-  // --- Scroll -------------------------------------------------------------
+  // --- Scroll -----------------------------------------------------------
 
   getScrollTop() { return this.scrollTop; }
   setScrollTop(top) {
@@ -251,7 +288,7 @@ class PulsarTextEditorComponent {
   getScrollLeftColumn() { return 0; }
   setScrollLeftColumn(_column) {}
 
-  // --- Viewport -----------------------------------------------------------
+  // --- Viewport ---------------------------------------------------------
 
   getFirstVisibleRow() { return 0; }
   getLastVisibleRow() { return 0; }
@@ -260,12 +297,12 @@ class PulsarTextEditorComponent {
   getRenderedStartRow() { return 0; }
   getRenderedEndRow() { return 0; }
 
-  // --- Input --------------------------------------------------------------
+  // --- Input ------------------------------------------------------------
 
   setInputEnabled(_enabled) {}
   getHiddenInput() { return this.hiddenInput; }
 
-  // --- Decoration / gutter queries ---------------------------------------
+  // --- Decoration / gutter queries -------------------------------------
 
   queryGuttersToRender() {
     return this.props.model
