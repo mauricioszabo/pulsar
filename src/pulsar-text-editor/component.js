@@ -1,6 +1,6 @@
 'use babel';
 
-// New SolidJS-based TextEditorComponent (scaffold).
+// New SolidJS-based TextEditorComponent — Commit B MVP.
 //
 // IMPORTANT: this file is loaded indirectly via `./index.js`, which
 // runs `./solid-loader-shim` first. Do not require this file directly
@@ -10,70 +10,146 @@
 // loads and caches the SSR core before resolution can be patched.
 // See ./index.js for the full rationale.
 //
-// This file is the actual implementation entry point for the
-// experimental text editor gated behind the `core.useNewTextEditor`
-// config flag. Right now most public methods are *stubs*: they
-// return a reasonable default so external callers (text-editor.js,
-// text-editor-element.js, downstream packages) do not crash when
-// the flag is on. The legacy Etch implementation at
-// src/text-editor-component.js remains the default and is not
-// modified.
+// Scope of this commit (per ADR 006, Commit B):
+//   - Render every screen line of the model in source order, plain
+//     monospace, no syntax highlighting yet.
+//   - A simple cursor sits on top, positioned by row * lineHeight and
+//     column * charWidth (both measured once on mount).
+//   - The hidden input captures `input` events and forwards them to
+//     `model.insertText`. Editing keys (Backspace, Enter, arrows,
+//     etc.) flow through Atom's keymap → editor commands → model,
+//     which fires `didChangeDisplayLayer` / `didChangeSelectionRange`
+//     back into us; both bump Solid signals that drive re-render.
+//   - No virtualization, no scrolling beyond browser default, no
+//     gutters, no decorations, no mouse interaction. Those land in
+//     subsequent commits.
 //
-// See docs/decisions/006-replace-etch-text-editor-with-solidjs.md
-// for the migration plan. Subsequent commits will replace the
-// placeholder rendering below with real SolidJS components for
-// lines, gutters, cursors, etc.
+// The legacy Etch implementation at src/text-editor-component.js
+// remains the default and is not modified.
 //
 // Authoring notes:
-// - This file uses JSX. The `'use babel'` header above triggers
-//   Pulsar's per-file Babel pipeline (see src/babel.js); the
-//   `overrides` entry in src/babel.config.js applies
-//   `babel-preset-solid` to anything under `src/pulsar-text-editor/`,
-//   so JSX becomes Solid template clones + reactive bindings at load
-//   time. There is no separate build step.
+// - JSX. The `'use babel'` header above triggers Pulsar's per-file
+//   Babel pipeline; the `overrides` entry in src/babel.config.js
+//   applies `babel-preset-solid` (with `moduleName` pointed at the
+//   client `web.cjs`) to anything under `src/pulsar-text-editor/`.
 
-const { render } = require('solid-js/web');
-const { createSignal, onCleanup } = require('solid-js');
+const { render, For } = require('solid-js/web');
+const { createSignal, createMemo, onCleanup, onMount } = require('solid-js');
 
 let TextEditor = null;
 let TextEditorElement = null;
 
-// --- Solid placeholder component ----------------------------------------
+// --- Solid components ---------------------------------------------------
 
-// Reactive ticker so we can visually confirm Solid signals and DOM
-// bindings are alive: the number on screen should increment once per
-// second. Removed once the real renderer lands.
-function ScaffoldPlaceholder(props) {
-  const [tick, setTick] = createSignal(0);
-  const intervalId = setInterval(() => setTick(t => t + 1), 1000);
-  onCleanup(() => clearInterval(intervalId));
+function Line(props) {
+  // NBSP gives empty lines a height so the cursor is visible on them.
+  return (
+    <div class="line" data-screen-row={props.row}>
+      {props.lineText && props.lineText.length > 0 ? props.lineText : ' '}
+    </div>
+  );
+}
 
-  const containerStyle = [
-    'display: block',
-    'box-sizing: border-box',
-    'width: 100%',
-    'height: 100%',
-    'min-height: 4em',
-    'padding: 1em',
-    'background: #2a1414',
-    'color: #ff8a8a',
-    'font-family: monospace',
-    'font-size: 14px',
-    'border: 2px dashed #ff5252',
-    'white-space: pre-wrap',
-    'overflow: auto'
-  ].join('; ') + ';';
+function Cursor(props) {
+  // `props.position`, `props.lineHeight`, `props.charWidth` are
+  // accessor functions — read them inside the style accessor so Solid
+  // re-runs the binding when any of them change.
+  const style = () => {
+    const lh = props.lineHeight();
+    const cw = props.charWidth();
+    if (!lh) return 'display: none';
+    const pos = props.position();
+    if (!pos) return 'display: none';
+    return [
+      'position: absolute',
+      'left: ' + (pos.column * cw) + 'px',
+      'top: ' + (pos.row * lh) + 'px',
+      'width: 2px',
+      'height: ' + lh + 'px',
+      'background: currentColor',
+      'pointer-events: none'
+    ].join('; ') + ';';
+  };
+  return <div class="cursor" style={style()} />;
+}
+
+function Editor(props) {
+  const model = props.model;
+  const component = props.component;
+
+  // --- reactive sources ---
+
+  // Bumped by didChangeDisplayLayer / didResetDisplayLayer.
+  const [displayVersion, bumpDisplayVersion] = createSignal(0);
+  component._notifyDisplayChange = () =>
+    bumpDisplayVersion(v => v + 1);
+
+  // Bumped by didChangeSelectionRange / didUpdateSelections.
+  const [cursorPos, setCursorPos] = createSignal(
+    model.getCursorScreenPosition()
+  );
+  component._notifySelectionChange = () =>
+    setCursorPos(model.getCursorScreenPosition());
+
+  // Measurements (filled in onMount).
+  const [lineHeight, setLineHeight] = createSignal(0);
+  const [charWidth, setCharWidth] = createSignal(0);
+
+  // --- derived data ---
+
+  const screenLines = createMemo(() => {
+    displayVersion(); // dependency
+    const count = model.getScreenLineCount();
+    const arr = new Array(count);
+    for (let i = 0; i < count; i++) {
+      arr[i] = model.screenLineForScreenRow(i);
+    }
+    return arr;
+  });
+
+  // --- mount ---
+
+  let measureRef;
+  onMount(() => {
+    if (!measureRef) return;
+    const sample = measureRef.querySelector('.measurement-sample');
+    if (!sample) return;
+    const rect = sample.getBoundingClientRect();
+    // `sample` contains exactly one 'x' character. Its rendered width is
+    // the base char width; its height is the line height.
+    setCharWidth(rect.width);
+    setLineHeight(rect.height);
+    component._lineHeight = rect.height;
+    component._charWidth = rect.width;
+  });
+
+  // --- render ---
 
   return (
-    <div class="pulsar-text-editor-placeholder" style={containerStyle}>
-      <div>[pulsar-text-editor] new SolidJS text editor (experimental scaffold).</div>
-      <div>Rendering not yet implemented. core.useNewTextEditor is ON.</div>
-      <div>
-        Solid signal tick: <strong>{tick()}s</strong>
-        {' '}— if this number is changing, JSX → Babel → Solid → reactive DOM
-        is working end to end.
+    <div
+      class="pulsar-editor-root"
+      style="position: relative; font-family: monospace; white-space: pre; overflow: auto; height: 100%; box-sizing: border-box;"
+    >
+      <div
+        ref={el => (measureRef = el)}
+        class="measurements"
+        aria-hidden="true"
+        style="position: absolute; left: -9999px; top: 0; visibility: hidden; pointer-events: none;"
+      >
+        <span class="measurement-sample">x</span>
       </div>
-      <div>Model id: {props.modelId}</div>
+      <div class="lines" style="position: relative;">
+        <For each={screenLines()}>
+          {(line, i) => (
+            <Line lineText={line && line.lineText} row={i()} />
+          )}
+        </For>
+        <Cursor
+          position={cursorPos}
+          lineHeight={lineHeight}
+          charWidth={charWidth}
+        />
+      </div>
     </div>
   );
 }
@@ -129,6 +205,16 @@ class PulsarTextEditorComponent {
     this.attached = false;
     this.scrollTop = 0;
     this.scrollLeft = 0;
+    this.inputEnabled = true;
+
+    // Cached on mount by the Editor Solid component, used by
+    // `getLineHeight`/`getBaseCharacterWidth` and friends.
+    this._lineHeight = 0;
+    this._charWidth = 0;
+
+    // Set by the Editor Solid component to bump the relevant signals.
+    this._notifyDisplayChange = null;
+    this._notifySelectionChange = null;
 
     // `<atom-text-editor>` may be created with prior children (e.g. an
     // `initialText` text node from `textContent`). Clear them so the
@@ -137,35 +223,72 @@ class PulsarTextEditorComponent {
       this.element.removeChild(this.element.firstChild);
     }
 
+    // Hidden input — captures keystrokes that produce text. Editing
+    // commands (backspace, enter, arrows, …) bypass this and flow
+    // through atom.keymaps → editor commands → model.
     this.hiddenInput = document.createElement('input');
     this.hiddenInput.classList.add('hidden-input');
     this.hiddenInput.setAttribute('tabindex', '-1');
     this.hiddenInput.style.cssText =
-      'position: absolute; width: 1px; height: 1px; opacity: 0;';
+      'position: absolute; width: 1px; height: 1px; opacity: 0; ' +
+      'padding: 0; border: 0; pointer-events: none;';
+    this.hiddenInput.addEventListener('input', this._onHiddenInputInput.bind(this));
+    this.hiddenInput.addEventListener('focus', this._onHiddenInputFocus.bind(this));
+    this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
     this.element.appendChild(this.hiddenInput);
 
+    // Solid mount target. The Editor renders into this div.
     this.solidHost = document.createElement('div');
     this.solidHost.classList.add('pulsar-text-editor-solid-host');
     this.solidHost.style.cssText = 'display: block; width: 100%; height: 100%;';
     this.element.appendChild(this.solidHost);
 
-    const modelId = this.props.model && this.props.model.id;
     this.disposeRender = render(
-      () => <ScaffoldPlaceholder modelId={modelId} />,
+      () => <Editor model={this.props.model} component={this} />,
       this.solidHost
     );
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
 
-    // Diagnostic — visible in DevTools so we can confirm the swap fires
-    // and the Solid mount succeeded. Remove once rendering lands.
+    // Diagnostic — visible in DevTools so we can confirm the swap
+    // fires and the Solid mount succeeded. Remove once stable.
     // eslint-disable-next-line no-console
     console.info(
       '[pulsar-text-editor] mounted on',
       this.element,
-      '(model:', modelId, ')'
+      '(model:', this.props.model && this.props.model.id, ')'
     );
+  }
+
+  // --- Hidden input handlers --------------------------------------------
+
+  _onHiddenInputInput(event) {
+    if (!this.inputEnabled) return;
+    // event.data is the inserted text for `insertText`,
+    // `insertFromPaste`, `insertCompositionText`, etc. Null for
+    // deletion-type inputs (which we don't expect here — Backspace
+    // is consumed by atom.keymaps before it reaches us).
+    const text = event.data;
+    if (text != null && text.length > 0) {
+      this.props.model.insertText(text);
+    }
+    // Clear so we never accumulate state in the input element.
+    this.hiddenInput.value = '';
+  }
+
+  _onHiddenInputFocus() {
+    if (!this.focused) {
+      this.focused = true;
+      this.element.classList.add('is-focused');
+    }
+  }
+
+  _onHiddenInputBlur() {
+    if (this.focused) {
+      this.focused = false;
+      this.element.classList.remove('is-focused');
+    }
   }
 
   // --- Update / lifecycle -----------------------------------------------
@@ -208,18 +331,49 @@ class PulsarTextEditorComponent {
 
   didShow() { this.visible = true; }
   didHide() { this.visible = false; }
-  didFocus() { this.focused = true; }
-  didBlur() { this.focused = false; }
+
+  didFocus() {
+    // Forward focus to the hidden input so keystrokes have a target.
+    if (!this.focused) {
+      this.focused = true;
+      this.element.classList.add('is-focused');
+    }
+    if (document.activeElement !== this.hiddenInput) {
+      this.hiddenInput.focus();
+    }
+  }
+
+  didBlur() {
+    if (this.focused) {
+      this.focused = false;
+      this.element.classList.remove('is-focused');
+    }
+  }
 
   didUpdateStyles() {}
   didUpdateScrollbarStyles() {}
 
   // --- Model-driven callbacks (called from text-editor.js) --------------
 
-  didChangeDisplayLayer(_changes) {}
-  didResetDisplayLayer() {}
-  didChangeSelectionRange() {}
-  didUpdateSelections() {}
+  didChangeDisplayLayer(_changes) {
+    if (this._notifyDisplayChange) this._notifyDisplayChange();
+    // The cursor sits on top of the lines; a display change can move it.
+    if (this._notifySelectionChange) this._notifySelectionChange();
+  }
+
+  didResetDisplayLayer() {
+    if (this._notifyDisplayChange) this._notifyDisplayChange();
+    if (this._notifySelectionChange) this._notifySelectionChange();
+  }
+
+  didChangeSelectionRange() {
+    if (this._notifySelectionChange) this._notifySelectionChange();
+  }
+
+  didUpdateSelections() {
+    if (this._notifySelectionChange) this._notifySelectionChange();
+  }
+
   didRequestAutoscroll(_scrollEvent) {}
 
   addBlockDecoration(_decoration) {}
@@ -227,8 +381,12 @@ class PulsarTextEditorComponent {
 
   // --- Position / measurement queries -----------------------------------
 
-  pixelPositionForScreenPosition(_screenPosition) {
-    return { top: 0, left: 0 };
+  pixelPositionForScreenPosition(screenPosition) {
+    if (!screenPosition) return { top: 0, left: 0 };
+    return {
+      top: (screenPosition.row || 0) * this._lineHeight,
+      left: (screenPosition.column || 0) * this._charWidth
+    };
   }
 
   screenPositionForPixelPosition(_pixelPosition) {
@@ -244,21 +402,34 @@ class PulsarTextEditorComponent {
 
   renderedScreenLineForRow(_row) { return null; }
 
-  measureDimensions() {}
+  measureDimensions() {
+    // Measurements are taken in the Editor component's `onMount`.
+    // This is a no-op now; if a caller needs a refresh, future
+    // commits can re-run the measurement here.
+  }
 
   // --- Dimensions -------------------------------------------------------
 
-  getLineHeight() { return 0; }
-  getBaseCharacterWidth() { return 0; }
+  getLineHeight() { return this._lineHeight || 0; }
+  getBaseCharacterWidth() { return this._charWidth || 0; }
 
-  getContentHeight() { return 0; }
-  getContentWidth() { return 0; }
+  getContentHeight() {
+    return this.props.model.getScreenLineCount() * (this._lineHeight || 0);
+  }
 
-  getClientContainerHeight() { return 0; }
-  getClientContainerWidth() { return 0; }
-  getScrollContainerHeight() { return 0; }
-  getScrollContainerWidth() { return 0; }
-  getScrollContainerClientHeight() { return 0; }
+  getContentWidth() {
+    return this.props.model.getMaxScreenLineLength() * (this._charWidth || 0);
+  }
+
+  getClientContainerHeight() {
+    return this.element ? this.element.clientHeight : 0;
+  }
+  getClientContainerWidth() {
+    return this.element ? this.element.clientWidth : 0;
+  }
+  getScrollContainerHeight() { return this.getClientContainerHeight(); }
+  getScrollContainerWidth() { return this.getClientContainerWidth(); }
+  getScrollContainerClientHeight() { return this.getClientContainerHeight(); }
 
   getVerticalScrollbarWidth() { return 0; }
   getHorizontalScrollbarHeight() { return 0; }
@@ -284,28 +455,50 @@ class PulsarTextEditorComponent {
   getScrollRight() { return this.scrollLeft; }
   setScrollRight(_right) { return this.scrollLeft; }
 
-  getScrollHeight() { return 0; }
-  getScrollWidth() { return 0; }
-  getMaxScrollTop() { return 0; }
-  getMaxScrollLeft() { return 0; }
+  getScrollHeight() { return this.getContentHeight(); }
+  getScrollWidth() { return this.getContentWidth(); }
+  getMaxScrollTop() {
+    return Math.max(0, this.getScrollHeight() - this.getClientContainerHeight());
+  }
+  getMaxScrollLeft() {
+    return Math.max(0, this.getScrollWidth() - this.getClientContainerWidth());
+  }
 
-  getScrollTopRow() { return 0; }
-  setScrollTopRow(_row) {}
-  getScrollLeftColumn() { return 0; }
-  setScrollLeftColumn(_column) {}
+  getScrollTopRow() {
+    return this._lineHeight ? Math.floor(this.scrollTop / this._lineHeight) : 0;
+  }
+  setScrollTopRow(row) {
+    if (this._lineHeight) this.setScrollTop(row * this._lineHeight);
+  }
+  getScrollLeftColumn() {
+    return this._charWidth ? Math.floor(this.scrollLeft / this._charWidth) : 0;
+  }
+  setScrollLeftColumn(column) {
+    if (this._charWidth) this.setScrollLeft(column * this._charWidth);
+  }
 
   // --- Viewport ---------------------------------------------------------
 
-  getFirstVisibleRow() { return 0; }
-  getLastVisibleRow() { return 0; }
-  getFirstVisibleColumn() { return 0; }
+  // We don't virtualize yet, so the rendered range is the entire buffer.
+  getFirstVisibleRow() { return this.getScrollTopRow(); }
+  getLastVisibleRow() {
+    const lh = this._lineHeight;
+    if (!lh) return 0;
+    return Math.min(
+      this.props.model.getScreenLineCount() - 1,
+      Math.floor((this.scrollTop + this.getClientContainerHeight()) / lh)
+    );
+  }
+  getFirstVisibleColumn() { return this.getScrollLeftColumn(); }
 
   getRenderedStartRow() { return 0; }
-  getRenderedEndRow() { return 0; }
+  getRenderedEndRow() {
+    return this.props.model.getScreenLineCount();
+  }
 
   // --- Input ------------------------------------------------------------
 
-  setInputEnabled(_enabled) {}
+  setInputEnabled(enabled) { this.inputEnabled = enabled !== false; }
   getHiddenInput() { return this.hiddenInput; }
 
   // --- Decoration / gutter queries -------------------------------------
