@@ -139,6 +139,12 @@ const configSchema = {
         default: false,
         description: "Prompt before saving a file in a conflicted state, as happens when a file’s contents on disk are changed by another program while edits are pending."
       },
+      useNewTextEditor: {
+        type: 'boolean',
+        title: 'Experimental: Use New Text Editor',
+        default: false,
+        description: 'Render `atom-text-editor` elements with the new SolidJS-based implementation instead of the legacy Etch one. The new implementation is incomplete; expect missing features. Restart required after changing.'
+      },
       fileEncoding: {
         description:
           'Default character set encoding to use when reading and writing files.',

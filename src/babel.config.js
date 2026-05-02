@@ -15,9 +15,11 @@ let plugins = [];
 
 // Files that opt into the SolidJS JSX transform via `babel-preset-solid`.
 // Scoped here (rather than added to the global preset list) so the rest of
-// the codebase keeps the existing transform pipeline unchanged.
+// the codebase keeps the existing transform pipeline unchanged. Matches the
+// legacy `text-editor-component.js` and anything under `src/pulsar-text-editor/`
+// (the new SolidJS implementation, gated by the `core.useNewTextEditor` flag).
 let solidOverride = {
-  test: [/text-editor-component\.js$/],
+  test: [/text-editor-component\.js$/, /[\\/]pulsar-text-editor[\\/]/],
   presets: ['babel-preset-solid']
 };
 
