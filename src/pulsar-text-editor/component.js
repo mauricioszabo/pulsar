@@ -22,9 +22,15 @@
 //    selection; double/triple-click selects word/line; drag selection.
 //  - Autoscroll: `didRequestAutoscroll` drives vertical and horizontal
 //    scroll to keep the cursor in view after any movement.
-//  - Focus: `element.focus()` is overridden to always target the
-//    hidden input, covering every upstream path (pane activation,
-//    tab switches, `atom.workspace.open()`, etc.).
+//  - Focus: when the editor element receives focus, `didFocus`
+//    forwards focus to the hidden input so it can collect keystrokes.
+//    The element's own `focus` event still fires, so packages like
+//    autocomplete-plus that listen to `editorView.addEventListener
+//    ('focus', …)` see activation as expected. `didBlur` calls
+//    `stopImmediatePropagation()` when the blur is just due to focus
+//    transferring to our hidden input child, preventing downstream
+//    listeners (e.g. atom-select-list's `didLoseFocus`) from
+//    misinterpreting it as a real blur.
 //  - Measurement: line height is taken from a block wrapper (not
 //    just the inline character), so the full rendered line height
 //    including leading is captured. Character width is averaged over
@@ -289,6 +295,19 @@ function Editor(props) {
 
   // Blinking control.
   const [blinkOff, setBlinkOff] = createSignal(false);
+
+  // Placeholder text shown when buffer is empty (mini editors mostly).
+  // Bumped by onDidChangePlaceholderText and by every buffer change so
+  // it appears/disappears as the user types/deletes.
+  const [placeholderVersion, bumpPlaceholder] = createSignal(0);
+  component._notifyPlaceholderChange = () => bumpPlaceholder((v) => v + 1);
+
+  const placeholderText = createMemo(() => {
+    placeholderVersion();
+    displayVersion();
+    if (!model.isEmpty || !model.isEmpty()) return null;
+    return model.getPlaceholderText ? model.getPlaceholderText() : null;
+  });
 
   // --- refs ---
   let measureRef;
@@ -576,6 +595,16 @@ function Editor(props) {
             {/* Bottom spacer fills the remaining virtual height. */}
             <div style={`height: ${bottomSpacer()}px; display: block;`} />
 
+            {/* Placeholder text (e.g. "Filter commands", "Search…")
+                shown when the buffer is empty. Mini editors use this
+                heavily — without it, fuzzy finder and command palette
+                inputs look blank when first opened. */}
+            <Show when={placeholderText() != null}>
+              <div class="placeholder-text" style="position: absolute; top: 0; left: 0;">
+                {placeholderText()}
+              </div>
+            </Show>
+
             {/* Overlay layers: selections + cursors. Both span the full
                 content height so any row is reachable.  Note: NO
                 `overflow: hidden` here — that would create a local
@@ -723,18 +752,16 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
-    // Override `element.focus()` to redirect to the hidden input. This
-    // handles every upstream call path: `paneElement.activated()`,
-    // `activeItemChanged()` after a tab switch,
-    // `atom.workspace.open()` post-open focus, etc.
-    const originalFocus = this.element.focus.bind(this.element);
-    this.element.focus = (options) => {
-      if (this.hiddenInput) {
-        this.hiddenInput.focus(options);
-      } else {
-        originalFocus(options);
-      }
-    };
+    // Focus management note: we deliberately do NOT override
+    // `element.focus()` to short-circuit straight to the hidden input.
+    // The natural flow — `element.focus()` → element receives focus →
+    // `focus` event fires on element → text-editor-element's listener
+    // calls `component.didFocus()` → `hiddenInput.focus()` — is
+    // important because packages like autocomplete-plus listen to the
+    // `focus` event on the editor element to know that this editor is
+    // active. Bypassing the element's focus event entirely silently
+    // breaks autocomplete activation, suggestion lists, and other
+    // packages that rely on `editorView.addEventListener('focus', …)`.
 
     // Mousedown: position cursor and start selection drag.
     this.element.addEventListener('mousedown', this._onMouseDown.bind(this), true);
@@ -765,6 +792,15 @@ class PulsarTextEditorComponent {
     if (this.props.model.onDidTokenize) {
       this._tokenizeSub = this.props.model.onDidTokenize(() => {
         if (this._notifyDisplayChange) this._notifyDisplayChange();
+      });
+    }
+
+    // Placeholder text changes when consumers update the editor — e.g.
+    // command palette swapping the prompt. Subscribe so the displayed
+    // text updates without waiting for the next buffer change.
+    if (this.props.model.onDidChangePlaceholderText) {
+      this._placeholderSub = this.props.model.onDidChangePlaceholderText(() => {
+        if (this._notifyPlaceholderChange) this._notifyPlaceholderChange();
       });
     }
 
@@ -926,6 +962,10 @@ class PulsarTextEditorComponent {
       this._tokenizeSub.dispose();
       this._tokenizeSub = null;
     }
+    if (this._placeholderSub) {
+      this._placeholderSub.dispose();
+      this._placeholderSub = null;
+    }
     if (this.disposeRender) {
       this.disposeRender();
       this.disposeRender = null;
@@ -935,17 +975,32 @@ class PulsarTextEditorComponent {
   didShow() { this.visible = true; }
   didHide() { this.visible = false; }
 
-  didFocus() {
+  didFocus(event) {
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
     }
+    // Forward focus to the hidden input so it can receive keystrokes.
+    // The element's `focus` event has already fired by the time we
+    // get here, so packages listening for it (autocomplete-plus, etc.)
+    // have observed activation before we redirect.
     if (document.activeElement !== this.hiddenInput) {
-      this.hiddenInput.focus();
+      this.hiddenInput.focus({ preventScroll: true });
     }
   }
 
-  didBlur() {
+  didBlur(event) {
+    // Critical: when focus is just transferring from the editor element
+    // to its own hidden input child, treat that as "still focused" and
+    // stop the blur from propagating. Without this, downstream blur
+    // listeners (e.g. atom-select-list's `didLoseFocus`, which thinks
+    // the dialog has been dismissed and re-focuses the element, causing
+    // an infinite focus → didFocus → hiddenInput.focus → blur loop)
+    // misbehave. This mirrors the legacy editor's `didBlur` behavior.
+    if (event && event.relatedTarget === this.hiddenInput) {
+      event.stopImmediatePropagation();
+      return;
+    }
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');

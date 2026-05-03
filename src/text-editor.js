@@ -86,14 +86,30 @@ module.exports = class TextEditor {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateStyles();
+    TextEditorComponent.didUpdateStyles();
+    // Also notify the experimental SolidJS-based component if any
+    // editors are using it (core.useNewTextEditor === true). Without
+    // this, font/zoom/theme changes wouldn't trigger a re-measure on
+    // those editors and the cursor would drift away from the text.
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static didUpdateScrollbarStyles() {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateScrollbarStyles();
+    TextEditorComponent.didUpdateScrollbarStyles();
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateScrollbarStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static viewForItem(item) {
