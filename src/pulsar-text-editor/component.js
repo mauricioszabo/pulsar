@@ -1,57 +1,41 @@
 'use babel';
 
-// New SolidJS-based TextEditorComponent — Commit C.
+// SolidJS-based TextEditorComponent — Commit D (feature-complete MVP).
 //
-// IMPORTANT: this file is loaded indirectly via `./index.js`, which
-// runs `./solid-loader-shim` first. Do not require this file directly
-// from outside the directory — `babel-preset-solid` hoists its
-// runtime imports above any source-level `require()`, so without the
-// shim being installed before this module is read, Solid's `web.cjs`
-// loads and caches the SSR core before resolution can be patched.
-// See ./index.js for the full rationale.
-//
-// Scope of this commit:
-//   - Lines are absolute-positioned at `row * lineHeight`, eliminating
-//     the subpixel-accumulation drift that the inline flow layout in
-//     Commit B suffered from. Cursors are likewise placed at
-//     `col * charWidth, row * lineHeight`. Both lines and cursors share
-//     the same coordinate system inside the `.lines` container, so they
-//     stay aligned regardless of how subtly the rendered char width
-//     differs from our measurement.
-//   - Syntax highlighting via `walkScreenLineTags` from
-//     `../screen-line-tag-walker` — the same walker the legacy editor
-//     uses. Output is built as an HTML string and assigned via Solid's
-//     `innerHTML` prop; the line is treated as opaque DOM, which is
-//     dramatically faster than nesting Solid components per scope.
-//   - Blinking cursor: an interval flips a class on `.cursors`, which
-//     is faded out via the existing `.cursors.blink-off .cursor` CSS
-//     rule. Blinking pauses for ~300ms after every selection change so
-//     the cursor stays solidly visible while the user is moving it.
-//   - Mouse: clicking maps `clientX/Y` to a screen position via the
-//     measured `lineHeight` / `charWidth` plus `caretRangeFromPoint`
-//     for fine column accuracy, and drives `model.setCursorScreenPosition`.
-//     Mousedown + drag extends the selection.
-//   - Autoscroll: `didRequestAutoscroll` (called by the model whenever
-//     a cursor moves with `autoscroll: true` — the default) computes a
-//     desired scroll rectangle from the screen range and adjusts
-//     `scrollTop` / `scrollLeft` so the cursor stays in view.
-//   - Focus: `element.focus()` is overridden to redirect to the hidden
-//     input. This catches every path that brings focus to the editor —
-//     `pane.activated()` calling `paneElement.focus()` then forwarding
-//     to `view.focus()`, `pane.activeItemChanged()` calling
-//     `itemView.focus()` after a tab switch, `atom.workspace.open()`
-//     callers calling `editor.element.focus()`, etc. — without each one
-//     having to be wired separately.
-//
-// Out of scope (still): gutters, line numbers, decorations, code
-// folding, soft wrap, virtualization for very long lines.
+// Features in this commit:
+//  - Line number gutter with buffer-row numbers and soft-wrap dots.
+//  - Viewport virtualization: only the rows currently visible in the
+//    scroll viewport (plus OVERSCAN rows of padding above/below) are
+//    rendered. Top and bottom spacer divs fill the rest of the
+//    content height so native scrollbars are correctly sized.
+//  - Correct layout: the gutter sticks to the left via CSS
+//    `position: sticky; left: 0` and lines use a block flow layout,
+//    so the browser establishes the content width naturally from the
+//    longest rendered line. No more `width: 1px` starvation.
+//  - Correct syntax highlighting via the existing `walkScreenLineTags`
+//    walker, same as the legacy editor.
+//  - Selections rendered as `.selection > .region` rects so the
+//    existing core CSS (`@syntax-selection-color`) applies.
+//  - Blinking cursor via `.cursors.blink-off` toggle, controlled by
+//    the existing core CSS rule.
+//  - Mouse support: click to position cursor; shift-click extends
+//    selection; double/triple-click selects word/line; drag selection.
+//  - Autoscroll: `didRequestAutoscroll` drives vertical and horizontal
+//    scroll to keep the cursor in view after any movement.
+//  - Focus: `element.focus()` is overridden to always target the
+//    hidden input, covering every upstream path (pane activation,
+//    tab switches, `atom.workspace.open()`, etc.).
+//  - Measurement: line height is taken from a block wrapper (not
+//    just the inline character), so the full rendered line height
+//    including leading is captured. Character width is averaged over
+//    100 characters to eliminate per-character subpixel rounding.
 
 const { render, For } = require('solid-js/web');
 const {
   createSignal,
   createMemo,
-  onCleanup,
-  onMount
+  onMount,
+  onCleanup
 } = require('solid-js');
 
 const { walkScreenLineTags } = require('../screen-line-tag-walker');
@@ -59,20 +43,19 @@ const { walkScreenLineTags } = require('../screen-line-tag-walker');
 let TextEditor = null;
 let TextEditorElement = null;
 
+// How many extra rows to render beyond the visible viewport on each side.
+const OVERSCAN = 10;
 const CURSOR_BLINK_PERIOD = 800;
 const CURSOR_BLINK_RESUME_DELAY = 300;
-// Keep at least this many lines of context above/below the cursor when
-// autoscrolling — matches the legacy editor's default `verticalScrollMargin`.
 const DEFAULT_VERTICAL_SCROLL_MARGIN = 2;
 const DEFAULT_HORIZONTAL_SCROLL_MARGIN = 6;
+const NBSP = ' ';
 
-// --- Helpers ------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// HTML building helpers
+// ---------------------------------------------------------------------------
 
 function escapeHtml(s) {
-  // We only ever pass user-line text (and class names) through here, so
-  // a minimal escape table is sufficient. `"` doesn't need escaping
-  // inside an element body, but we escape it anyway because className
-  // strings are also fed through this routine when building attributes.
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -80,221 +63,349 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-// Walk a screen line's tag stream and return the inner HTML for the
-// `.line` div. Mirrors `LineComponent.appendContents` in the legacy
-// component but emits a string instead of touching the DOM directly,
-// which lets us hand the result to Solid's `innerHTML` prop.
+// Build the inner HTML for a `.line` div by walking the tag stream.
+// Returns a plain HTML string suitable for `innerHTML`.
 function buildLineHtml(screenLine, displayLayer) {
-  if (!screenLine || !screenLine.tags) {
-    const text = (screenLine && screenLine.lineText) || '';
-    return text.length > 0 ? escapeHtml(text) : '&nbsp;';
+  if (!screenLine) return NBSP;
+  if (!screenLine.tags || screenLine.tags.length === 0) {
+    const text = screenLine.lineText || '';
+    return text.length > 0 ? escapeHtml(text) : NBSP;
   }
   let html = '';
-  let emittedAnyText = false;
+  let hasText = false;
   walkScreenLineTags({
     tags: screenLine.tags,
-    lineText: screenLine.lineText,
+    lineText: screenLine.lineText || '',
     displayLayer,
-    onOpenScope: (className) => {
-      html += '<span class="' + escapeHtml(className) + '">';
-    },
-    onCloseScope: () => {
-      html += '</span>';
-    },
+    onOpenScope: (cls) => { html += '<span class="' + escapeHtml(cls) + '">'; },
+    onCloseScope: () => { html += '</span>'; },
     onTextRun: (text) => {
-      if (text.length > 0) emittedAnyText = true;
+      if (text.length > 0) hasText = true;
       html += escapeHtml(text);
     }
   });
-  if (!emittedAnyText) html += '&nbsp;';
+  if (!hasText) html += NBSP;
   return html;
 }
 
-// --- Solid components ---------------------------------------------------
+// ---------------------------------------------------------------------------
+// Solid components
+// ---------------------------------------------------------------------------
 
+// One screen line. Uses innerHTML so the span nesting from the tag
+// walker is applied as a single DOM mutation rather than a tree of
+// Solid components.
 function Line(props) {
-  // `props.screenLine` is fresh each render (the model rebuilds the
-  // array of screen lines on every display change), so this memo
-  // recomputes per render too — that's fine, the walker is cheap.
   const html = createMemo(() =>
     buildLineHtml(props.screenLine, props.displayLayer)
   );
+  // `props.cursorLine` is true when this row holds the primary cursor.
+  const cls = () => 'line' + (props.cursorLine ? ' cursor-line' : '');
   return (
     <div
-      class="line"
+      class={cls()}
       data-screen-row={props.row}
-      style={
-        'position: absolute; left: 0; right: 0; ' +
-        'top: ' + (props.row * props.lineHeight) + 'px; ' +
-        'height: ' + props.lineHeight + 'px;'
-      }
       // eslint-disable-next-line solid/no-innerhtml
       innerHTML={html()}
     />
   );
 }
 
-function Cursor(props) {
-  // `props.position` is an accessor; reading it inside the inline style
-  // builder makes Solid re-evaluate when the position changes.
+// One line-number cell in the gutter.
+function LineNumber(props) {
+  const cls = () => {
+    let c = 'line-number';
+    if (props.foldable) c += ' foldable';
+    return c;
+  };
+  // Number string: right-padded with NBSP to maxDigits width; soft-wrapped
+  // rows show a bullet instead.
+  const label = () => {
+    if (!props.showLineNumbers) return '';
+    const raw = props.softWrapped ? '•' : String(props.bufferRow + 1);
+    return NBSP.repeat(Math.max(0, props.maxDigits - raw.length)) + raw;
+  };
+  return (
+    <div class={cls()} data-screen-row={props.row}>
+      <span class="line-number-text">{label()}</span>
+      <div class="icon-right" />
+    </div>
+  );
+}
+
+// The left gutter containing line numbers. Lives OUTSIDE the scroll-view
+// so it doesn't scroll horizontally. Vertical sync is achieved by applying
+// translateY(-scrollTop) to the inner content, exactly as the legacy editor
+// does.  The container clips content with `overflow: hidden`.
+function GutterContainer(props) {
+  // `props.scrollTop`, `props.topSpacer`, `props.bottomSpacer`,
+  // `props.visibleRows`, `props.showLineNumbers`, `props.maxDigits`
+  // are all accessor functions (memos / signals from Editor).
+  return (
+    <div
+      class="gutter-container"
+      style={
+        'position: relative; z-index: 1; flex-shrink: 0; ' +
+        'background-color: inherit; overflow: hidden; user-select: none;'
+      }
+    >
+      <div
+        class="gutter line-numbers"
+        style={
+          'will-change: transform; ' +
+          'transform: translateY(' + (-props.scrollTop()) + 'px);'
+        }
+      >
+        <div style={`height: ${props.topSpacer()}px; display: block;`} />
+        <For each={props.visibleRows()}>
+          {(item) => (
+            <LineNumber
+              row={item.screenRow}
+              bufferRow={item.bufferRow}
+              softWrapped={item.softWrapped}
+              foldable={item.foldable}
+              showLineNumbers={props.showLineNumbers()}
+              maxDigits={props.maxDigits()}
+            />
+          )}
+        </For>
+        <div style={`height: ${props.bottomSpacer()}px; display: block;`} />
+      </div>
+    </div>
+  );
+}
+
+// Converts a screen-range into a list of absolutely-positioned rect
+// descriptors. Callers map these to `.region` divs inside a `.selection`
+// wrapper so the core CSS `@syntax-selection-color` rule applies.
+function rangeToRects(range, lh, cw) {
+  if (!range || range.isEmpty()) return [];
+  const { start, end } = range;
+  if (start.row === end.row) {
+    const w = (end.column - start.column) * cw;
+    if (w <= 0) return [];
+    return [{
+      top: start.row * lh,
+      left: start.column * cw,
+      width: w,
+      right: null,
+      height: lh
+    }];
+  }
+  const rects = [];
+  // Top partial line (start.col → end of line).
+  rects.push({ top: start.row * lh, left: start.column * cw, right: 0, width: null, height: lh });
+  // Full middle lines (if any).
+  if (end.row - start.row > 1) {
+    rects.push({
+      top: (start.row + 1) * lh,
+      left: 0, right: 0, width: null,
+      height: (end.row - start.row - 1) * lh
+    });
+  }
+  // Bottom partial line (0 → end.col).
+  if (end.column > 0) {
+    rects.push({ top: end.row * lh, left: 0, width: end.column * cw, right: null, height: lh });
+  }
+  return rects;
+}
+
+// Render one selection range as `.region` divs inside a `.selection`.
+function SelectionHighlight(props) {
+  const rects = createMemo(() => {
+    const lh = props.lineHeight();
+    const cw = props.charWidth();
+    if (!lh || !cw) return [];
+    return rangeToRects(props.range, lh, cw);
+  });
+  return (
+    <div class="highlight selection">
+      <For each={rects()}>
+        {(r) => (
+          <div
+            class="region"
+            style={
+              'position: absolute; box-sizing: border-box; ' +
+              'top: ' + r.top + 'px; ' +
+              'left: ' + r.left + 'px; ' +
+              'height: ' + r.height + 'px; ' +
+              (r.right != null ? 'right: 0; ' : 'width: ' + r.width + 'px; ')
+            }
+          />
+        )}
+      </For>
+    </div>
+  );
+}
+
+// Absolute-positioned cursor bar. Uses CSS `border-left` for the
+// visible caret; opacity is controlled by `.is-focused .cursor` and
+// `.cursors.blink-off .cursor` in core-ui/text-editor.less.
+function CursorBar(props) {
   const style = () => {
     const lh = props.lineHeight();
     const cw = props.charWidth();
-    if (!lh) return 'display: none;';
+    if (!lh || !cw) return 'display: none;';
     const pos = props.position;
     if (!pos) return 'display: none;';
     return (
       'position: absolute; ' +
       'left: ' + (pos.column * cw) + 'px; ' +
       'top: ' + (pos.row * lh) + 'px; ' +
-      'width: ' + Math.max(1, Math.round(cw)) + 'px; ' +
-      'height: ' + lh + 'px; ' +
-      'pointer-events: none;'
+      'width: ' + cw + 'px; ' +
+      'height: ' + lh + 'px;'
     );
   };
   return <div class="cursor" style={style()} />;
 }
 
-function Selection(props) {
-  // Render a selection range as up to three rectangles: a partial top
-  // line, a full middle block, and a partial bottom line. Matches what
-  // CodeMirror / the legacy editor draw.
-  const rects = createMemo(() => {
-    const range = props.range;
-    if (!range || range.isEmpty()) return [];
-    const lh = props.lineHeight();
-    const cw = props.charWidth();
-    if (!lh || !cw) return [];
-    const startRow = range.start.row;
-    const endRow = range.end.row;
-    const startCol = range.start.column;
-    const endCol = range.end.column;
-    const out = [];
-    if (startRow === endRow) {
-      out.push({
-        top: startRow * lh,
-        left: startCol * cw,
-        width: Math.max(0, (endCol - startCol) * cw),
-        height: lh
-      });
-    } else {
-      // Top line: from startCol to end of line. We don't know the line's
-      // length in pixels here without a measurement; extend to the right
-      // edge of the content area instead, which is what users expect.
-      out.push({
-        top: startRow * lh,
-        left: startCol * cw,
-        right: 0,
-        height: lh
-      });
-      if (endRow > startRow + 1) {
-        out.push({
-          top: (startRow + 1) * lh,
-          left: 0,
-          right: 0,
-          height: (endRow - startRow - 1) * lh
-        });
-      }
-      out.push({
-        top: endRow * lh,
-        left: 0,
-        width: endCol * cw,
-        height: lh
-      });
-    }
-    return out;
-  });
-  return (
-    <For each={rects()}>
-      {(r) => (
-        <div
-          class="selection"
-          style={
-            'position: absolute; ' +
-            'top: ' + r.top + 'px; ' +
-            'left: ' + r.left + 'px; ' +
-            (r.right != null ? 'right: ' + r.right + 'px; ' : '') +
-            (r.width != null ? 'width: ' + r.width + 'px; ' : '') +
-            'height: ' + r.height + 'px; ' +
-            'pointer-events: none;'
-          }
-        />
-      )}
-    </For>
-  );
-}
-
+// Top-level editor component.
 function Editor(props) {
   const model = props.model;
   const component = props.component;
   const displayLayer = model.displayLayer;
 
-  // --- reactive sources ---
+  // --- reactive signals ---
 
-  const [displayVersion, bumpDisplayVersion] = createSignal(0);
-  component._notifyDisplayChange = () => bumpDisplayVersion((v) => v + 1);
+  const [displayVersion, bumpDisplay] = createSignal(0);
+  component._notifyDisplayChange = () => bumpDisplay((v) => v + 1);
 
-  const [selectionsVersion, bumpSelectionsVersion] = createSignal(0);
-  component._notifySelectionChange = () =>
-    bumpSelectionsVersion((v) => v + 1);
+  const [selectionsVersion, bumpSelections] = createSignal(0);
+  component._notifySelectionChange = () => bumpSelections((v) => v + 1);
 
+  // scrollTop and scrollLeft are kept in sync with the scroller DOM
+  // element via a scroll event listener installed in onMount.
   const [scrollTop, setScrollTop] = createSignal(0);
   const [scrollLeft, setScrollLeft] = createSignal(0);
   component._setScrollTopSignal = setScrollTop;
   component._setScrollLeftSignal = setScrollLeft;
 
+  // Viewport height in px, updated on resize.
+  const [viewportHeight, setViewportHeight] = createSignal(0);
+
+  // Font metrics, filled by the measurement pass in onMount.
   const [lineHeight, setLineHeight] = createSignal(0);
   const [charWidth, setCharWidth] = createSignal(0);
 
+  // Blinking control.
   const [blinkOff, setBlinkOff] = createSignal(false);
-  component._pauseBlinkAndShow = () => {
-    setBlinkOff(false);
-    component._restartBlinkInterval();
-  };
+
+  // --- refs ---
+  let measureRef;
+  let scrollerRef;
+  let linesWrapperRef;
 
   // --- derived data ---
 
-  const screenLines = createMemo(() => {
+  const totalScreenRows = createMemo(() => {
     displayVersion();
-    const count = model.getScreenLineCount();
-    const arr = new Array(count);
-    for (let i = 0; i < count; i++) {
-      arr[i] = model.screenLineForScreenRow(i);
+    return model.getScreenLineCount();
+  });
+
+  const firstRenderedRow = createMemo(() => {
+    const lh = lineHeight();
+    if (!lh) return 0;
+    return Math.max(0, Math.floor(scrollTop() / lh) - OVERSCAN);
+  });
+
+  const lastRenderedRow = createMemo(() => {
+    const lh = lineHeight();
+    const total = totalScreenRows();
+    if (!lh) return Math.min(total - 1, OVERSCAN * 2);
+    const viewH = viewportHeight() || (scrollerRef ? scrollerRef.clientHeight : 0);
+    return Math.min(total - 1, Math.ceil((scrollTop() + viewH) / lh) + OVERSCAN);
+  });
+
+  const topSpacer = createMemo(() => firstRenderedRow() * (lineHeight() || 0));
+
+  const bottomSpacer = createMemo(() => {
+    const lh = lineHeight();
+    if (!lh) return 0;
+    const last = lastRenderedRow();
+    const total = totalScreenRows();
+    return Math.max(0, (total - 1 - last) * lh);
+  });
+
+  // Array of { row, screenLine } objects for visible rows.
+  const visibleScreenLines = createMemo(() => {
+    displayVersion();
+    const first = firstRenderedRow();
+    const last = lastRenderedRow();
+    const arr = [];
+    for (let r = first; r <= last; r++) {
+      arr.push({ row: r, screenLine: model.screenLineForScreenRow(r) });
     }
     return arr;
   });
 
+  // Gutter data: same row range with buffer-row metadata.
+  const visibleRows = createMemo(() => {
+    displayVersion();
+    const first = firstRenderedRow();
+    const last = lastRenderedRow();
+    const count = last - first + 1;
+    if (count <= 0) return [];
+
+    const rows = [];
+    let prevBufRow = first > 0 ? model.bufferRowForScreenRow(first - 1) : -1;
+    for (let i = 0; i < count; i++) {
+      const screenRow = first + i;
+      const bufRow = model.bufferRowForScreenRow(screenRow);
+      const softWrapped = bufRow === prevBufRow;
+      const nextBufRow = i + 1 < count
+        ? model.bufferRowForScreenRow(screenRow + 1)
+        : bufRow + 1;
+      const foldable = !softWrapped &&
+        bufRow !== nextBufRow &&
+        model.isFoldableAtBufferRow(bufRow);
+      rows.push({ screenRow, bufferRow: bufRow, softWrapped, foldable });
+      prevBufRow = bufRow;
+    }
+    return rows;
+  });
+
+  const maxDigits = createMemo(() => {
+    displayVersion();
+    return Math.max(2, String(model.getLineCount()).length);
+  });
+
+  const showLineNumbers = createMemo(() => {
+    displayVersion();
+    return model.doesShowLineNumbers ? model.doesShowLineNumbers() : true;
+  });
+
   const cursorPositions = createMemo(() => {
     selectionsVersion();
-    const cursors = model.getCursors();
-    return cursors.map((c) => c.getScreenPosition());
+    return model.getCursors().map((c) => c.getScreenPosition());
   });
 
   const selectionRanges = createMemo(() => {
     selectionsVersion();
-    const selections = model.getSelections();
-    return selections.map((s) => s.getScreenRange());
+    return model.getSelections().map((s) => s.getScreenRange());
   });
 
-  // --- mount / measure ---
+  // Set of screen rows that have a cursor on them, for cursor-line class.
+  const cursorRows = createMemo(() => {
+    selectionsVersion();
+    const s = new Set();
+    model.getCursors().forEach((c) => s.add(c.getScreenPosition().row));
+    return s;
+  });
 
-  let measureRef;
-  let scrollerRef;
-  let linesRef;
+  // --- measurement ---
 
   const measure = () => {
     if (!measureRef) return false;
-    const sample = measureRef.querySelector('.measurement-sample');
-    if (!sample) return false;
-    const rect = sample.getBoundingClientRect();
-    if (!rect.width || !rect.height) return false;
-    // The sample contains exactly 100 'x's so we average across them and
-    // avoid the per-character subpixel rounding error that made the
-    // single-character measurement drift visibly at column ~40+.
-    const cw = rect.width / 100;
-    const lh = rect.height;
-    setCharWidth(cw);
+    const lineEl = measureRef.querySelector('.measure-line');
+    const spanEl = measureRef.querySelector('.measure-chars');
+    if (!lineEl || !spanEl) return false;
+    const lineRect = lineEl.getBoundingClientRect();
+    const spanRect = spanEl.getBoundingClientRect();
+    if (!lineRect.height || !spanRect.width) return false;
+    const lh = lineRect.height;
+    const cw = spanRect.width / 100;
     setLineHeight(lh);
+    setCharWidth(cw);
     component._lineHeight = lh;
     component._charWidth = cw;
     return true;
@@ -302,67 +413,57 @@ function Editor(props) {
 
   onMount(() => {
     component._scroller = scrollerRef;
-    component._linesEl = linesRef;
+    component._linesWrapper = linesWrapperRef;
+
     if (!measure()) {
       if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(measure);
+        document.fonts.ready.then(() => measure());
       }
-      requestAnimationFrame(() => {
-        if (!component._lineHeight) measure();
-      });
+      requestAnimationFrame(() => { if (!component._lineHeight) measure(); });
     }
-    // Wire the scroll container's scroll position back into our signals
-    // so cursor / selection coordinates and the future virtualization
-    // stay in sync with the actual viewport.
+
+    // Sync scroll position signals with the DOM.
     const onScroll = () => {
-      setScrollTop(scrollerRef.scrollTop);
-      setScrollLeft(scrollerRef.scrollLeft);
-      component.scrollTop = scrollerRef.scrollTop;
-      component.scrollLeft = scrollerRef.scrollLeft;
+      const st = scrollerRef.scrollTop;
+      const sl = scrollerRef.scrollLeft;
+      setScrollTop(st);
+      setScrollLeft(sl);
+      component.scrollTop = st;
+      component.scrollLeft = sl;
     };
     scrollerRef.addEventListener('scroll', onScroll, { passive: true });
-    onCleanup(() => scrollerRef.removeEventListener('scroll', onScroll));
+
+    // Resize observer to update viewport height.
+    const ro = new ResizeObserver(() => {
+      setViewportHeight(scrollerRef.clientHeight);
+    });
+    ro.observe(scrollerRef);
+
+    onCleanup(() => {
+      scrollerRef.removeEventListener('scroll', onScroll);
+      ro.disconnect();
+    });
   });
 
   // --- blinking ---
 
-  let blinkInterval = null;
-  let resumeTimeout = null;
-  const restartBlinkInterval = () => {
-    if (blinkInterval) clearInterval(blinkInterval);
-    if (resumeTimeout) clearTimeout(resumeTimeout);
+  component._restartBlink = () => {
+    if (component._blinkInterval) clearInterval(component._blinkInterval);
+    if (component._blinkResume) clearTimeout(component._blinkResume);
     setBlinkOff(false);
-    // Pause briefly then start the periodic toggle, so the cursor stays
-    // solid right after a selection change and the user can see where it
-    // landed.
-    resumeTimeout = setTimeout(() => {
-      blinkInterval = setInterval(() => {
+    component._blinkResume = setTimeout(() => {
+      component._blinkInterval = setInterval(() => {
         if (!component.focused || !component.attached) return;
         setBlinkOff((v) => !v);
       }, CURSOR_BLINK_PERIOD / 2);
     }, CURSOR_BLINK_RESUME_DELAY);
   };
-  component._restartBlinkInterval = restartBlinkInterval;
-  onMount(() => restartBlinkInterval());
+
+  onMount(() => { if (component.focused) component._restartBlink(); });
+
   onCleanup(() => {
-    if (blinkInterval) clearInterval(blinkInterval);
-    if (resumeTimeout) clearTimeout(resumeTimeout);
-  });
-
-  // --- content size ---
-
-  const contentHeight = createMemo(
-    () => screenLines().length * (lineHeight() || 0)
-  );
-  const contentWidth = createMemo(() => {
-    // Approximate the content width from the model's longest line; we'll
-    // refine this later by measuring rendered widths.
-    const cw = charWidth();
-    if (!cw) return 0;
-    const longest = model.getMaxScreenLineLength
-      ? model.getMaxScreenLineLength()
-      : 0;
-    return Math.max(longest * cw, 0);
+    if (component._blinkInterval) clearInterval(component._blinkInterval);
+    if (component._blinkResume) clearTimeout(component._blinkResume);
   });
 
   // --- render ---
@@ -371,76 +472,117 @@ function Editor(props) {
     <div
       class="pulsar-editor-root"
       style={
-        'position: relative; width: 100%; height: 100%; ' +
-        'overflow: hidden; box-sizing: border-box; ' +
-        'font-family: monospace; white-space: pre;'
+        'display: flex; flex-direction: column; ' +
+        'width: 100%; height: 100%; ' +
+        'overflow: hidden; box-sizing: border-box;'
       }
     >
+      {/* Hidden measurement fixture. The `.measure-line` block gives us
+          the full rendered line height (including leading); the inner
+          `.measure-chars` span gives us the average character width. */}
       <div
         ref={(el) => (measureRef = el)}
-        class="measurements"
         aria-hidden="true"
         style={
           'position: absolute; left: -9999px; top: 0; ' +
-          'visibility: hidden; pointer-events: none; white-space: pre;'
+          'visibility: hidden; pointer-events: none;'
         }
       >
-        <span class="measurement-sample">{'x'.repeat(100)}</span>
+        <div class="measure-line" style="display: block; white-space: pre;">
+          <span class="measure-chars">{'x'.repeat(100)}</span>
+        </div>
       </div>
-      <div
-        ref={(el) => (scrollerRef = el)}
-        class="scroll-view"
-        style={
-          'position: absolute; inset: 0; overflow: auto; ' +
-          'will-change: scroll-position;'
-        }
-      >
+
+      {/* Main editor body: gutter (fixed-width, no horizontal scroll) +
+          scroll-view (takes the rest, scrolls both axes). The gutter lives
+          OUTSIDE the scroll container so it is never scrolled horizontally;
+          it syncs vertically through a CSS translateY in GutterContainer. */}
+      <div style="display: flex; flex-direction: row; flex: 1; overflow: hidden; min-height: 0;">
+
+        <GutterContainer
+          scrollTop={scrollTop}
+          visibleRows={visibleRows}
+          topSpacer={topSpacer}
+          bottomSpacer={bottomSpacer}
+          showLineNumbers={showLineNumbers}
+          maxDigits={maxDigits}
+        />
+
+        {/* Scroll-view: native overflow:auto handles both scrollbars.
+            The lines-wrapper inside uses flow layout so each `.line`
+            block naturally expands the content width to accommodate
+            the longest line — no explicit `width` calculation needed. */}
         <div
-          ref={(el) => (linesRef = el)}
-          class="lines"
-          style={
-            'position: relative; ' +
-            'width: ' + Math.max(contentWidth(), 1) + 'px; ' +
-            'height: ' + Math.max(contentHeight(), 1) + 'px;'
-          }
+          ref={(el) => (scrollerRef = el)}
+          class="scroll-view"
+          style="flex: 1; overflow: auto; position: relative;"
         >
-          <For each={screenLines()}>
-            {(line, i) => (
-              <Line
-                screenLine={line}
-                displayLayer={displayLayer}
-                row={i()}
-                lineHeight={lineHeight()}
-              />
-            )}
-          </For>
           <div
-            class={'selections' + (blinkOff() ? ' blink-off' : '')}
-            style="position: absolute; inset: 0; pointer-events: none;"
+            ref={(el) => (linesWrapperRef = el)}
+            class="lines-wrapper"
+            style="position: relative; white-space: pre; min-width: 100%;"
           >
-            <For each={selectionRanges()}>
-              {(range) => (
-                <Selection
-                  range={range}
-                  lineHeight={lineHeight}
-                  charWidth={charWidth}
+            {/* Top spacer pushes the first rendered row to its correct
+                vertical position. */}
+            <div style={`height: ${topSpacer()}px; display: block;`} />
+
+            {/* Rendered lines in flow layout. Each `.line` is `display:
+                block` so its content width drives the scroll container
+                width. Syntax-highlighted spans nest inside. */}
+            <For each={visibleScreenLines()}>
+              {(item) => (
+                <Line
+                  screenLine={item.screenLine}
+                  displayLayer={displayLayer}
+                  row={item.row}
+                  cursorLine={cursorRows().has(item.row)}
                 />
               )}
             </For>
-          </div>
-          <div
-            class={'cursors' + (blinkOff() ? ' blink-off' : '')}
-            style="position: absolute; inset: 0; pointer-events: none;"
-          >
-            <For each={cursorPositions()}>
-              {(pos) => (
-                <Cursor
-                  position={pos}
-                  lineHeight={lineHeight}
-                  charWidth={charWidth}
-                />
-              )}
-            </For>
+
+            {/* Bottom spacer fills the remaining virtual height. */}
+            <div style={`height: ${bottomSpacer()}px; display: block;`} />
+
+            {/* Overlay layers: selections + cursors. Both are absolutely
+                positioned with top:0 and cover the full content height
+                (all rows, not just the rendered window) so a cursor or
+                selection at any row is visible when scrolled there. */}
+            <div
+              class="highlights"
+              style={
+                'position: absolute; top: 0; left: 0; right: 0; ' +
+                'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
+                'pointer-events: none; overflow: hidden;'
+              }
+            >
+              <For each={selectionRanges()}>
+                {(range) => (
+                  <SelectionHighlight
+                    range={range}
+                    lineHeight={lineHeight}
+                    charWidth={charWidth}
+                  />
+                )}
+              </For>
+            </div>
+            <div
+              class={'cursors' + (blinkOff() ? ' blink-off' : '')}
+              style={
+                'position: absolute; top: 0; left: 0; right: 0; ' +
+                'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
+                'pointer-events: none; overflow: hidden;'
+              }
+            >
+              <For each={cursorPositions()}>
+                {(pos) => (
+                  <CursorBar
+                    position={pos}
+                    lineHeight={lineHeight}
+                    charWidth={charWidth}
+                  />
+                )}
+              </For>
+            </div>
           </div>
         </div>
       </div>
@@ -448,7 +590,10 @@ function Editor(props) {
   );
 }
 
-// --- Component class ----------------------------------------------------
+// ---------------------------------------------------------------------------
+// Component class — public API called by text-editor-element.js,
+// text-editor.js, and various packages.
+// ---------------------------------------------------------------------------
 
 class PulsarTextEditorComponent {
   // --- Static API -------------------------------------------------------
@@ -485,9 +630,7 @@ class PulsarTextEditorComponent {
     if (this.props.element) {
       this.element = this.props.element;
     } else {
-      if (!TextEditorElement) {
-        TextEditorElement = require('../text-editor-element');
-      }
+      if (!TextEditorElement) TextEditorElement = require('../text-editor-element');
       this.element = TextEditorElement.createTextEditorElement();
     }
     this.element.initialize(this);
@@ -503,52 +646,41 @@ class PulsarTextEditorComponent {
     this._lineHeight = 0;
     this._charWidth = 0;
 
-    // Set by the Editor Solid component.
+    // Set by the Editor Solid component after it mounts.
     this._notifyDisplayChange = null;
     this._notifySelectionChange = null;
     this._setScrollTopSignal = null;
     this._setScrollLeftSignal = null;
-    this._pauseBlinkAndShow = null;
-    this._restartBlinkInterval = null;
+    this._restartBlink = null;
     this._scroller = null;
-    this._linesEl = null;
+    this._linesWrapper = null;
+    this._blinkInterval = null;
+    this._blinkResume = null;
     this._activeItemSub = null;
 
-    // `<atom-text-editor>` may carry pre-existing children (e.g. the
-    // `initialText` text node from `textContent`); clear them so the
-    // Solid root has a clean container.
+    // Clear any pre-existing children (e.g. initialText node).
     while (this.element.firstChild) {
       this.element.removeChild(this.element.firstChild);
     }
 
-    // Hidden input — captures keystrokes that produce text. Editing
-    // commands (backspace, enter, arrows, …) bypass this and flow
-    // through atom.keymaps → editor commands → model.
+    // Hidden input: captures typed text as `input` events. All editing
+    // key commands (Backspace, arrow keys, etc.) are handled by
+    // atom.keymaps and never arrive here as raw key events.
     this.hiddenInput = document.createElement('input');
     this.hiddenInput.classList.add('hidden-input');
     this.hiddenInput.setAttribute('tabindex', '-1');
     this.hiddenInput.style.cssText =
       'position: absolute; width: 1px; height: 1px; opacity: 0; ' +
       'padding: 0; border: 0; pointer-events: none; z-index: 5;';
-    this.hiddenInput.addEventListener(
-      'input',
-      this._onHiddenInputInput.bind(this)
-    );
-    this.hiddenInput.addEventListener(
-      'focus',
-      this._onHiddenInputFocus.bind(this)
-    );
-    this.hiddenInput.addEventListener(
-      'blur',
-      this._onHiddenInputBlur.bind(this)
-    );
+    this.hiddenInput.addEventListener('input', this._onHiddenInputInput.bind(this));
+    this.hiddenInput.addEventListener('focus', this._onHiddenInputFocus.bind(this));
+    this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
     this.element.appendChild(this.hiddenInput);
 
-    // Solid mount target.
+    // Solid host div.
     this.solidHost = document.createElement('div');
     this.solidHost.classList.add('pulsar-text-editor-solid-host');
-    this.solidHost.style.cssText =
-      'display: block; width: 100%; height: 100%;';
+    this.solidHost.style.cssText = 'display: block; width: 100%; height: 100%;';
     this.element.appendChild(this.solidHost);
 
     this.disposeRender = render(
@@ -556,33 +688,24 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
-    // Focus interception. Override the host element's `focus()` so any
-    // upstream caller that focuses the editor (pane activation, tab
-    // switch, workspace.open, etc.) ends up at the hidden input. This
-    // is much more robust than chasing every individual focus path.
-    const originalElementFocus = this.element.focus.bind(this.element);
+    // Override `element.focus()` to redirect to the hidden input. This
+    // handles every upstream call path: `paneElement.activated()`,
+    // `activeItemChanged()` after a tab switch,
+    // `atom.workspace.open()` post-open focus, etc.
+    const originalFocus = this.element.focus.bind(this.element);
     this.element.focus = (options) => {
       if (this.hiddenInput) {
         this.hiddenInput.focus(options);
       } else {
-        originalElementFocus(options);
+        originalFocus(options);
       }
     };
 
-    // Mouse: clicks (or click+drag) inside the lines area position the
-    // cursor and start a selection. Clicks elsewhere in the editor
-    // shell still focus the input but don't move the cursor.
-    this.element.addEventListener(
-      'mousedown',
-      this._onMouseDown.bind(this),
-      true
-    );
+    // Mousedown: position cursor and start selection drag.
+    this.element.addEventListener('mousedown', this._onMouseDown.bind(this), true);
 
-    // When the workspace's active pane item becomes our editor — e.g.
-    // because the user clicked our tab — focus the hidden input. This
-    // covers the case where `pane.activateItem()` runs without the
-    // pane already having focus, which would otherwise leave the new
-    // editor visible but not receiving keystrokes.
+    // Workspace subscription: when a tab switch makes this editor
+    // active, focus the hidden input.
     if (global.atom && global.atom.workspace) {
       this._activeItemSub = global.atom.workspace.onDidChangeActivePaneItem(
         (item) => {
@@ -616,17 +739,12 @@ class PulsarTextEditorComponent {
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
-      if (this._restartBlinkInterval) this._restartBlinkInterval();
+      if (this._restartBlink) this._restartBlink();
     }
   }
 
   _onHiddenInputBlur(event) {
-    // If focus is moving to something inside our element (e.g. a child
-    // overlay we render later), don't treat it as a real blur.
-    if (
-      event.relatedTarget &&
-      this.element.contains(event.relatedTarget)
-    ) {
+    if (event.relatedTarget && this.element.contains(event.relatedTarget)) {
       return;
     }
     if (this.focused) {
@@ -639,15 +757,17 @@ class PulsarTextEditorComponent {
 
   _onMouseDown(event) {
     if (event.button !== 0) return;
-    // Always grab focus on any click in the editor — even if it's on
-    // chrome that doesn't move the cursor.
+
+    // Always focus the hidden input on any click inside the editor.
     if (document.activeElement !== this.hiddenInput) {
       this.hiddenInput.focus({ preventScroll: true });
     }
-    if (!this._linesEl || !this._lineHeight) return;
-    const linesRect = this._linesEl.getBoundingClientRect();
+
+    if (!this._linesWrapper || !this._lineHeight) return;
+
+    const linesRect = this._linesWrapper.getBoundingClientRect();
     // Only treat clicks inside the lines area as cursor-positioning
-    // gestures. Clicks on (future) gutters / scrollbars fall through.
+    // gestures; clicks in the gutter fall through.
     if (
       event.clientX < linesRect.left ||
       event.clientY < linesRect.top ||
@@ -658,8 +778,9 @@ class PulsarTextEditorComponent {
     }
 
     event.preventDefault();
-    const screenPosition = this._screenPositionForMouseEvent(event);
     const model = this.props.model;
+    const screenPosition = this._screenPositionForMouse(event);
+
     if (event.shiftKey) {
       model.selectToScreenPosition(screenPosition, { autoscroll: false });
     } else if (event.detail === 2) {
@@ -672,15 +793,14 @@ class PulsarTextEditorComponent {
       model.setCursorScreenPosition(screenPosition, { autoscroll: false });
     }
 
-    // Track drag for selection extension.
+    // Track drag to extend the selection.
     let dragging = false;
-    const onMove = (moveEvent) => {
+    const onMove = (e) => {
       dragging = true;
-      const pos = this._screenPositionForMouseEvent(moveEvent);
-      model.selectToScreenPosition(pos, {
-        suppressSelectionMerge: true,
-        autoscroll: false
-      });
+      model.selectToScreenPosition(
+        this._screenPositionForMouse(e),
+        { suppressSelectionMerge: true, autoscroll: false }
+      );
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
@@ -694,17 +814,18 @@ class PulsarTextEditorComponent {
     window.addEventListener('mouseup', onUp, true);
   }
 
-  _screenPositionForMouseEvent(event) {
-    const linesRect = this._linesEl.getBoundingClientRect();
+  _screenPositionForMouse(event) {
+    const linesRect = this._linesWrapper.getBoundingClientRect();
     const lh = this._lineHeight;
     const cw = this._charWidth;
+    // getBoundingClientRect().top is the VISUAL top of the element on
+    // screen. Subtracting it from clientY gives the distance from the
+    // logical top of the lines content, which already accounts for
+    // any scroll offset — no need to add scrollTop again.
     const y = event.clientY - linesRect.top;
     const x = event.clientX - linesRect.left;
     const row = Math.max(0, Math.floor(y / lh));
-    const lineCount = this.props.model.getScreenLineCount();
-    const clampedRow = Math.min(row, lineCount - 1);
-    // Round to nearest column (so clicking just past mid-character lands
-    // after the character, like a normal text editor).
+    const clampedRow = Math.min(row, this.props.model.getScreenLineCount() - 1);
     const col = Math.max(0, Math.round(x / cw));
     return this.props.model.clipScreenPosition([clampedRow, col]);
   }
@@ -774,7 +895,7 @@ class PulsarTextEditorComponent {
   didUpdateStyles() {}
   didUpdateScrollbarStyles() {}
 
-  // --- Model-driven callbacks (called from text-editor.js) --------------
+  // --- Model callbacks --------------------------------------------------
 
   didChangeDisplayLayer(_changes) {
     if (this._notifyDisplayChange) this._notifyDisplayChange();
@@ -788,12 +909,12 @@ class PulsarTextEditorComponent {
 
   didChangeSelectionRange() {
     if (this._notifySelectionChange) this._notifySelectionChange();
-    if (this._pauseBlinkAndShow) this._pauseBlinkAndShow();
+    if (this._restartBlink) this._restartBlink();
   }
 
   didUpdateSelections() {
     if (this._notifySelectionChange) this._notifySelectionChange();
-    if (this._pauseBlinkAndShow) this._pauseBlinkAndShow();
+    if (this._restartBlink) this._restartBlink();
   }
 
   didRequestAutoscroll(autoscroll) {
@@ -806,61 +927,69 @@ class PulsarTextEditorComponent {
 
   _autoscrollVertically(screenRange, options) {
     const lh = this._lineHeight;
-    const startTop = screenRange.start.row * lh;
-    const endBottom = (screenRange.end.row + 1) * lh;
-    const viewportHeight = this._scroller.clientHeight;
-    const margin = this._verticalAutoscrollMargin() * lh;
-
-    let desiredTop = startTop - margin;
-    let desiredBottom = endBottom + margin;
+    const startPx = screenRange.start.row * lh;
+    const endPx = (screenRange.end.row + 1) * lh;
+    const viewH = this._scroller.clientHeight;
+    const marginLines = Math.min(
+      this.props.model && this.props.model.verticalScrollMargin != null
+        ? this.props.model.verticalScrollMargin
+        : DEFAULT_VERTICAL_SCROLL_MARGIN,
+      Math.max(0, Math.floor((viewH / lh - 1) / 2))
+    );
+    const margin = marginLines * lh;
 
     if (options && options.center) {
-      const desiredCenter = (startTop + endBottom) / 2;
-      desiredTop = desiredCenter - viewportHeight / 2;
-      desiredBottom = desiredCenter + viewportHeight / 2;
+      const center = (startPx + endPx) / 2;
+      this._scroller.scrollTop = center - viewH / 2;
+      return;
     }
 
-    if (desiredBottom > this._scroller.scrollTop + viewportHeight) {
-      this._scroller.scrollTop = desiredBottom - viewportHeight;
-    }
-    if (desiredTop < this._scroller.scrollTop) {
-      this._scroller.scrollTop = Math.max(0, desiredTop);
+    if (!options || options.reversed !== false) {
+      if (endPx + margin > this._scroller.scrollTop + viewH) {
+        this._scroller.scrollTop = endPx + margin - viewH;
+      }
+      if (startPx - margin < this._scroller.scrollTop) {
+        this._scroller.scrollTop = Math.max(0, startPx - margin);
+      }
+    } else {
+      if (startPx - margin < this._scroller.scrollTop) {
+        this._scroller.scrollTop = Math.max(0, startPx - margin);
+      }
+      if (endPx + margin > this._scroller.scrollTop + viewH) {
+        this._scroller.scrollTop = endPx + margin - viewH;
+      }
     }
   }
 
   _autoscrollHorizontally(screenRange, options) {
     const cw = this._charWidth;
-    if (!cw) return;
-    const startLeft = screenRange.start.column * cw;
-    const endRight = screenRange.end.column * cw;
-    const viewportWidth = this._scroller.clientWidth;
-    const margin = this._horizontalAutoscrollMargin() * cw;
+    if (!cw || !this._scroller) return;
+    const startPx = screenRange.start.column * cw;
+    const endPx = screenRange.end.column * cw;
+    const viewW = this._scroller.clientWidth;
+    const marginCols = Math.min(
+      this.props.model && this.props.model.horizontalScrollMargin != null
+        ? this.props.model.horizontalScrollMargin
+        : DEFAULT_HORIZONTAL_SCROLL_MARGIN,
+      Math.max(0, Math.floor((viewW / cw - 1) / 2))
+    );
+    const margin = marginCols * cw;
 
-    let desiredLeft = Math.max(0, startLeft - margin);
-    let desiredRight = endRight + margin;
-
-    if (options && options.center) {
-      const desiredCenter = (startLeft + endRight) / 2;
-      desiredLeft = desiredCenter - viewportWidth / 2;
-      desiredRight = desiredCenter + viewportWidth / 2;
+    if (!options || options.reversed !== false) {
+      if (endPx + margin > this._scroller.scrollLeft + viewW) {
+        this._scroller.scrollLeft = endPx + margin - viewW;
+      }
+      if (startPx - margin < this._scroller.scrollLeft) {
+        this._scroller.scrollLeft = Math.max(0, startPx - margin);
+      }
+    } else {
+      if (startPx - margin < this._scroller.scrollLeft) {
+        this._scroller.scrollLeft = Math.max(0, startPx - margin);
+      }
+      if (endPx + margin > this._scroller.scrollLeft + viewW) {
+        this._scroller.scrollLeft = endPx + margin - viewW;
+      }
     }
-
-    if (desiredRight > this._scroller.scrollLeft + viewportWidth) {
-      this._scroller.scrollLeft = desiredRight - viewportWidth;
-    }
-    if (desiredLeft < this._scroller.scrollLeft) {
-      this._scroller.scrollLeft = Math.max(0, desiredLeft);
-    }
-  }
-
-  _verticalAutoscrollMargin() {
-    const m = this.props.model && this.props.model.verticalScrollMargin;
-    return m != null ? m : DEFAULT_VERTICAL_SCROLL_MARGIN;
-  }
-
-  _horizontalAutoscrollMargin() {
-    const m = this.props.model && this.props.model.horizontalScrollMargin;
-    return m != null ? m : DEFAULT_HORIZONTAL_SCROLL_MARGIN;
   }
 
   addBlockDecoration(_decoration) {}
@@ -877,9 +1006,11 @@ class PulsarTextEditorComponent {
   }
 
   screenPositionForPixelPosition({ top, left }) {
-    if (!this._lineHeight) return this.props.model.clipScreenPosition([0, 0]);
-    const row = Math.max(0, Math.floor(top / this._lineHeight));
-    const col = Math.max(0, Math.round(left / (this._charWidth || 1)));
+    const lh = this._lineHeight;
+    const cw = this._charWidth;
+    if (!lh) return this.props.model.clipScreenPosition([0, 0]);
+    const row = Math.max(0, Math.floor(top / lh));
+    const col = Math.max(0, Math.round(left / (cw || 1)));
     return this.props.model.clipScreenPosition([row, col]);
   }
 
@@ -891,7 +1022,6 @@ class PulsarTextEditorComponent {
   }
 
   renderedScreenLineForRow(_row) { return null; }
-
   measureDimensions() {}
 
   // --- Dimensions -------------------------------------------------------
@@ -904,29 +1034,32 @@ class PulsarTextEditorComponent {
   }
 
   getContentWidth() {
-    return this.props.model.getMaxScreenLineLength() * (this._charWidth || 0);
+    return (
+      (this.props.model.getMaxScreenLineLength
+        ? this.props.model.getMaxScreenLineLength()
+        : 0) * (this._charWidth || 0)
+    );
   }
 
   getClientContainerHeight() {
-    return this.element ? this.element.clientHeight : 0;
+    return this._scroller ? this._scroller.clientHeight : (this.element ? this.element.clientHeight : 0);
   }
+
   getClientContainerWidth() {
-    return this.element ? this.element.clientWidth : 0;
+    return this._scroller ? this._scroller.clientWidth : (this.element ? this.element.clientWidth : 0);
   }
+
   getScrollContainerHeight() { return this.getClientContainerHeight(); }
   getScrollContainerWidth() { return this.getClientContainerWidth(); }
   getScrollContainerClientHeight() { return this.getClientContainerHeight(); }
 
   getVerticalScrollbarWidth() { return 0; }
   getHorizontalScrollbarHeight() { return 0; }
-
   getGutterContainerWidth() { return 0; }
 
   // --- Scroll -----------------------------------------------------------
 
-  getScrollTop() {
-    return this._scroller ? this._scroller.scrollTop : this.scrollTop;
-  }
+  getScrollTop() { return this._scroller ? this._scroller.scrollTop : this.scrollTop; }
   setScrollTop(top) {
     const v = Math.max(0, top || 0);
     this.scrollTop = v;
@@ -934,9 +1067,7 @@ class PulsarTextEditorComponent {
     return v;
   }
 
-  getScrollLeft() {
-    return this._scroller ? this._scroller.scrollLeft : this.scrollLeft;
-  }
+  getScrollLeft() { return this._scroller ? this._scroller.scrollLeft : this.scrollLeft; }
   setScrollLeft(left) {
     const v = Math.max(0, left || 0);
     this.scrollLeft = v;
@@ -944,46 +1075,30 @@ class PulsarTextEditorComponent {
     return v;
   }
 
-  getScrollBottom() {
-    return this.getScrollTop() + this.getClientContainerHeight();
-  }
-  setScrollBottom(bottom) {
-    return this.setScrollTop(bottom - this.getClientContainerHeight());
-  }
-  getScrollRight() {
-    return this.getScrollLeft() + this.getClientContainerWidth();
-  }
-  setScrollRight(right) {
-    return this.setScrollLeft(right - this.getClientContainerWidth());
-  }
+  getScrollBottom() { return this.getScrollTop() + this.getClientContainerHeight(); }
+  setScrollBottom(bottom) { return this.setScrollTop(bottom - this.getClientContainerHeight()); }
+
+  getScrollRight() { return this.getScrollLeft() + this.getClientContainerWidth(); }
+  setScrollRight(right) { return this.setScrollLeft(right - this.getClientContainerWidth()); }
 
   getScrollHeight() { return this.getContentHeight(); }
   getScrollWidth() { return this.getContentWidth(); }
+
   getMaxScrollTop() {
-    return Math.max(
-      0,
-      this.getScrollHeight() - this.getClientContainerHeight()
-    );
+    return Math.max(0, this.getScrollHeight() - this.getClientContainerHeight());
   }
   getMaxScrollLeft() {
-    return Math.max(
-      0,
-      this.getScrollWidth() - this.getClientContainerWidth()
-    );
+    return Math.max(0, this.getScrollWidth() - this.getClientContainerWidth());
   }
 
   getScrollTopRow() {
-    return this._lineHeight
-      ? Math.floor(this.getScrollTop() / this._lineHeight)
-      : 0;
+    return this._lineHeight ? Math.floor(this.getScrollTop() / this._lineHeight) : 0;
   }
   setScrollTopRow(row) {
     if (this._lineHeight) this.setScrollTop(row * this._lineHeight);
   }
   getScrollLeftColumn() {
-    return this._charWidth
-      ? Math.floor(this.getScrollLeft() / this._charWidth)
-      : 0;
+    return this._charWidth ? Math.floor(this.getScrollLeft() / this._charWidth) : 0;
   }
   setScrollLeftColumn(column) {
     if (this._charWidth) this.setScrollLeft(column * this._charWidth);
@@ -1003,9 +1118,7 @@ class PulsarTextEditorComponent {
   getFirstVisibleColumn() { return this.getScrollLeftColumn(); }
 
   getRenderedStartRow() { return 0; }
-  getRenderedEndRow() {
-    return this.props.model.getScreenLineCount();
-  }
+  getRenderedEndRow() { return this.props.model.getScreenLineCount(); }
 
   // --- Input ------------------------------------------------------------
 
@@ -1015,9 +1128,7 @@ class PulsarTextEditorComponent {
   // --- Decoration / gutter queries -------------------------------------
 
   queryGuttersToRender() {
-    return this.props.model
-      ? [this.props.model.getLineNumberGutter()]
-      : [];
+    return this.props.model ? [this.props.model.getLineNumberGutter()] : [];
   }
 
   queryDecorationsToRender() {}
