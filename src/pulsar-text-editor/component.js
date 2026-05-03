@@ -66,8 +66,13 @@ function Cursor(props) {
       'top: ' + (pos.row * lh) + 'px',
       'width: 2px',
       'height: ' + lh + 'px',
-      'background: currentColor',
-      'pointer-events: none'
+      // Explicit color (rather than `currentColor`) so the cursor is
+      // visible even when our minimal DOM doesn't pick up a theme's
+      // `color` cascade. Will be replaced by themeable styling later.
+      'background: #fff',
+      'box-shadow: 0 0 0 1px #000',
+      'pointer-events: none',
+      'z-index: 2'
     ].join('; ') + ';';
   };
   return <div class="cursor" style={style()} />;
@@ -110,17 +115,37 @@ function Editor(props) {
   // --- mount ---
 
   let measureRef;
-  onMount(() => {
-    if (!measureRef) return;
+  const measure = () => {
+    if (!measureRef) return false;
     const sample = measureRef.querySelector('.measurement-sample');
-    if (!sample) return;
+    if (!sample) return false;
     const rect = sample.getBoundingClientRect();
-    // `sample` contains exactly one 'x' character. Its rendered width is
-    // the base char width; its height is the line height.
+    // `sample` contains exactly one 'x' character. Its rendered width
+    // is the base char width; its height is the line height.
+    if (!rect.width || !rect.height) return false;
     setCharWidth(rect.width);
     setLineHeight(rect.height);
     component._lineHeight = rect.height;
     component._charWidth = rect.width;
+    // eslint-disable-next-line no-console
+    console.info(
+      '[pulsar-text-editor] measured lineHeight=' + rect.height +
+      ' charWidth=' + rect.width
+    );
+    return true;
+  };
+  onMount(() => {
+    // First attempt: synchronous after mount. If fonts haven't fully
+    // loaded yet, the rect may be 0 — retry on `document.fonts.ready`
+    // and on the next frame as a fallback.
+    if (measure()) return;
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(measure);
+    }
+    requestAnimationFrame(() => {
+      if (component._lineHeight) return;
+      measure();
+    });
   });
 
   // --- render ---
@@ -248,6 +273,22 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
+    // Click anywhere inside the editor must drive focus to the hidden
+    // input. Relying on the element's own `focus` event (fired when the
+    // browser focuses `<atom-text-editor>` because of its `tabindex=-1`)
+    // is unreliable in Chromium when the click target is a deep
+    // descendant: sometimes the focus event doesn't fire, and even when
+    // it does, our chained `hiddenInput.focus()` can be undone by the
+    // browser's own click-focus resolution. Listening for `mousedown`
+    // on capture (so we run before the browser shifts focus) and
+    // explicitly focusing the input is deterministic.
+    this.element.addEventListener('mousedown', event => {
+      if (event.target === this.hiddenInput) return;
+      // Don't preventDefault — that would stop selection from working
+      // later when we add mouse-driven cursor positioning.
+      this.hiddenInput.focus();
+    }, true);
+
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
 
@@ -264,6 +305,11 @@ class PulsarTextEditorComponent {
   // --- Hidden input handlers --------------------------------------------
 
   _onHiddenInputInput(event) {
+    // eslint-disable-next-line no-console
+    console.info(
+      '[pulsar-text-editor] input event data=', JSON.stringify(event.data),
+      'inputType=', event.inputType
+    );
     if (!this.inputEnabled) return;
     // event.data is the inserted text for `insertText`,
     // `insertFromPaste`, `insertCompositionText`, etc. Null for
@@ -278,6 +324,8 @@ class PulsarTextEditorComponent {
   }
 
   _onHiddenInputFocus() {
+    // eslint-disable-next-line no-console
+    console.info('[pulsar-text-editor] hidden input focus');
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
@@ -285,6 +333,8 @@ class PulsarTextEditorComponent {
   }
 
   _onHiddenInputBlur() {
+    // eslint-disable-next-line no-console
+    console.info('[pulsar-text-editor] hidden input blur');
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');
