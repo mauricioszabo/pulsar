@@ -22,15 +22,16 @@
 //    selection; double/triple-click selects word/line; drag selection.
 //  - Autoscroll: `didRequestAutoscroll` drives vertical and horizontal
 //    scroll to keep the cursor in view after any movement.
-//  - Focus: when the editor element receives focus, `didFocus`
-//    forwards focus to the hidden input so it can collect keystrokes.
-//    The element's own `focus` event still fires, so packages like
-//    autocomplete-plus that listen to `editorView.addEventListener
-//    ('focus', …)` see activation as expected. `didBlur` calls
-//    `stopImmediatePropagation()` when the blur is just due to focus
-//    transferring to our hidden input child, preventing downstream
-//    listeners (e.g. atom-select-list's `didLoseFocus`) from
-//    misinterpreting it as a real blur.
+//  - Focus: `element.focus()` is wrapped to (1) call native focus —
+//    so the element's `focus` event fires for autocomplete-plus and
+//    other packages that key off `editorView.addEventListener
+//    ('focus', …)` — and (2) explicitly forward to the hidden input
+//    so keystrokes have a target even on flows where the focus event
+//    listener doesn't fire reliably (e.g. atom-select-list inside a
+//    just-shown panel). `didBlur` calls `stopImmediatePropagation()`
+//    when the blur is just due to focus transferring to our hidden
+//    input, preventing downstream listeners (atom-select-list's
+//    `didLoseFocus`) from misinterpreting it as a real blur.
 //  - Measurement: line height is taken from a block wrapper (not
 //    just the inline character), so the full rendered line height
 //    including leading is captured. Character width is averaged over
@@ -763,16 +764,31 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
-    // Focus management note: we deliberately do NOT override
-    // `element.focus()` to short-circuit straight to the hidden input.
-    // The natural flow — `element.focus()` → element receives focus →
-    // `focus` event fires on element → text-editor-element's listener
-    // calls `component.didFocus()` → `hiddenInput.focus()` — is
-    // important because packages like autocomplete-plus listen to the
-    // `focus` event on the editor element to know that this editor is
-    // active. Bypassing the element's focus event entirely silently
-    // breaks autocomplete activation, suggestion lists, and other
-    // packages that rely on `editorView.addEventListener('focus', …)`.
+    // Focus management.
+    //
+    // Two-step focus override:
+    //   1. Call the element's native `focus()` so the element receives
+    //      focus and its `focus` event fires. Packages like
+    //      autocomplete-plus listen to that event on the editor view
+    //      via `editorView.addEventListener('focus', …)` to know an
+    //      editor became active — without this step the activation
+    //      hook never runs and autocomplete stays dormant.
+    //   2. Forward focus to the hidden input so it can collect
+    //      keystrokes. This is also done by `didFocus()` in response
+    //      to the focus event, but doing it here too is a belt-and-
+    //      suspenders measure: in some flows (e.g. atom-select-list's
+    //      `focus()` call right after `panel.show()`) the focus event
+    //      doesn't reliably reach `didFocus`, leaving the dialog
+    //      visible but unable to receive typing until the user clicks
+    //      the editor.  Explicitly chaining `hiddenInput.focus()` here
+    //      makes the open-and-type workflow Just Work.
+    const originalElementFocus = this.element.focus.bind(this.element);
+    this.element.focus = (options) => {
+      originalElementFocus(options);
+      if (this.hiddenInput) {
+        this.hiddenInput.focus(options || { preventScroll: true });
+      }
+    };
 
     // Mousedown: position cursor and start selection drag.
     this.element.addEventListener('mousedown', this._onMouseDown.bind(this), true);
