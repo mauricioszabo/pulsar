@@ -1,6 +1,6 @@
 'use babel';
 
-// New SolidJS-based TextEditorComponent — Commit B MVP.
+// New SolidJS-based TextEditorComponent — Commit C.
 //
 // IMPORTANT: this file is loaded indirectly via `./index.js`, which
 // runs `./solid-loader-shim` first. Do not require this file directly
@@ -10,100 +10,252 @@
 // loads and caches the SSR core before resolution can be patched.
 // See ./index.js for the full rationale.
 //
-// Scope of this commit (per ADR 006, Commit B):
-//   - Render every screen line of the model in source order, plain
-//     monospace, no syntax highlighting yet.
-//   - A simple cursor sits on top, positioned by row * lineHeight and
-//     column * charWidth (both measured once on mount).
-//   - The hidden input captures `input` events and forwards them to
-//     `model.insertText`. Editing keys (Backspace, Enter, arrows,
-//     etc.) flow through Atom's keymap → editor commands → model,
-//     which fires `didChangeDisplayLayer` / `didChangeSelectionRange`
-//     back into us; both bump Solid signals that drive re-render.
-//   - No virtualization, no scrolling beyond browser default, no
-//     gutters, no decorations, no mouse interaction. Those land in
-//     subsequent commits.
+// Scope of this commit:
+//   - Lines are absolute-positioned at `row * lineHeight`, eliminating
+//     the subpixel-accumulation drift that the inline flow layout in
+//     Commit B suffered from. Cursors are likewise placed at
+//     `col * charWidth, row * lineHeight`. Both lines and cursors share
+//     the same coordinate system inside the `.lines` container, so they
+//     stay aligned regardless of how subtly the rendered char width
+//     differs from our measurement.
+//   - Syntax highlighting via `walkScreenLineTags` from
+//     `../screen-line-tag-walker` — the same walker the legacy editor
+//     uses. Output is built as an HTML string and assigned via Solid's
+//     `innerHTML` prop; the line is treated as opaque DOM, which is
+//     dramatically faster than nesting Solid components per scope.
+//   - Blinking cursor: an interval flips a class on `.cursors`, which
+//     is faded out via the existing `.cursors.blink-off .cursor` CSS
+//     rule. Blinking pauses for ~300ms after every selection change so
+//     the cursor stays solidly visible while the user is moving it.
+//   - Mouse: clicking maps `clientX/Y` to a screen position via the
+//     measured `lineHeight` / `charWidth` plus `caretRangeFromPoint`
+//     for fine column accuracy, and drives `model.setCursorScreenPosition`.
+//     Mousedown + drag extends the selection.
+//   - Autoscroll: `didRequestAutoscroll` (called by the model whenever
+//     a cursor moves with `autoscroll: true` — the default) computes a
+//     desired scroll rectangle from the screen range and adjusts
+//     `scrollTop` / `scrollLeft` so the cursor stays in view.
+//   - Focus: `element.focus()` is overridden to redirect to the hidden
+//     input. This catches every path that brings focus to the editor —
+//     `pane.activated()` calling `paneElement.focus()` then forwarding
+//     to `view.focus()`, `pane.activeItemChanged()` calling
+//     `itemView.focus()` after a tab switch, `atom.workspace.open()`
+//     callers calling `editor.element.focus()`, etc. — without each one
+//     having to be wired separately.
 //
-// The legacy Etch implementation at src/text-editor-component.js
-// remains the default and is not modified.
-//
-// Authoring notes:
-// - JSX. The `'use babel'` header above triggers Pulsar's per-file
-//   Babel pipeline; the `overrides` entry in src/babel.config.js
-//   applies `babel-preset-solid` (with `moduleName` pointed at the
-//   client `web.cjs`) to anything under `src/pulsar-text-editor/`.
+// Out of scope (still): gutters, line numbers, decorations, code
+// folding, soft wrap, virtualization for very long lines.
 
 const { render, For } = require('solid-js/web');
-const { createSignal, createMemo, onCleanup, onMount } = require('solid-js');
+const {
+  createSignal,
+  createMemo,
+  onCleanup,
+  onMount
+} = require('solid-js');
+
+const { walkScreenLineTags } = require('../screen-line-tag-walker');
 
 let TextEditor = null;
 let TextEditorElement = null;
 
+const CURSOR_BLINK_PERIOD = 800;
+const CURSOR_BLINK_RESUME_DELAY = 300;
+// Keep at least this many lines of context above/below the cursor when
+// autoscrolling — matches the legacy editor's default `verticalScrollMargin`.
+const DEFAULT_VERTICAL_SCROLL_MARGIN = 2;
+const DEFAULT_HORIZONTAL_SCROLL_MARGIN = 6;
+
+// --- Helpers ------------------------------------------------------------
+
+function escapeHtml(s) {
+  // We only ever pass user-line text (and class names) through here, so
+  // a minimal escape table is sufficient. `"` doesn't need escaping
+  // inside an element body, but we escape it anyway because className
+  // strings are also fed through this routine when building attributes.
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Walk a screen line's tag stream and return the inner HTML for the
+// `.line` div. Mirrors `LineComponent.appendContents` in the legacy
+// component but emits a string instead of touching the DOM directly,
+// which lets us hand the result to Solid's `innerHTML` prop.
+function buildLineHtml(screenLine, displayLayer) {
+  if (!screenLine || !screenLine.tags) {
+    const text = (screenLine && screenLine.lineText) || '';
+    return text.length > 0 ? escapeHtml(text) : '&nbsp;';
+  }
+  let html = '';
+  let emittedAnyText = false;
+  walkScreenLineTags({
+    tags: screenLine.tags,
+    lineText: screenLine.lineText,
+    displayLayer,
+    onOpenScope: (className) => {
+      html += '<span class="' + escapeHtml(className) + '">';
+    },
+    onCloseScope: () => {
+      html += '</span>';
+    },
+    onTextRun: (text) => {
+      if (text.length > 0) emittedAnyText = true;
+      html += escapeHtml(text);
+    }
+  });
+  if (!emittedAnyText) html += '&nbsp;';
+  return html;
+}
+
 // --- Solid components ---------------------------------------------------
 
 function Line(props) {
-  // NBSP gives empty lines a height so the cursor is visible on them.
+  // `props.screenLine` is fresh each render (the model rebuilds the
+  // array of screen lines on every display change), so this memo
+  // recomputes per render too — that's fine, the walker is cheap.
+  const html = createMemo(() =>
+    buildLineHtml(props.screenLine, props.displayLayer)
+  );
   return (
-    <div class="line" data-screen-row={props.row}>
-      {props.lineText && props.lineText.length > 0 ? props.lineText : ' '}
-    </div>
+    <div
+      class="line"
+      data-screen-row={props.row}
+      style={
+        'position: absolute; left: 0; right: 0; ' +
+        'top: ' + (props.row * props.lineHeight) + 'px; ' +
+        'height: ' + props.lineHeight + 'px;'
+      }
+      // eslint-disable-next-line solid/no-innerhtml
+      innerHTML={html()}
+    />
   );
 }
 
 function Cursor(props) {
-  // `props.position`, `props.lineHeight`, `props.charWidth` are
-  // accessor functions — read them inside the style accessor so Solid
-  // re-runs the binding when any of them change.
+  // `props.position` is an accessor; reading it inside the inline style
+  // builder makes Solid re-evaluate when the position changes.
   const style = () => {
     const lh = props.lineHeight();
     const cw = props.charWidth();
-    if (!lh) return 'display: none';
-    const pos = props.position();
-    if (!pos) return 'display: none';
-    return [
-      'position: absolute',
-      'left: ' + (pos.column * cw) + 'px',
-      'top: ' + (pos.row * lh) + 'px',
-      'width: 2px',
-      'height: ' + lh + 'px',
-      // Explicit color (rather than `currentColor`) so the cursor is
-      // visible even when our minimal DOM doesn't pick up a theme's
-      // `color` cascade. Will be replaced by themeable styling later.
-      'background: #fff',
-      'box-shadow: 0 0 0 1px #000',
-      'pointer-events: none',
-      'z-index: 2'
-    ].join('; ') + ';';
+    if (!lh) return 'display: none;';
+    const pos = props.position;
+    if (!pos) return 'display: none;';
+    return (
+      'position: absolute; ' +
+      'left: ' + (pos.column * cw) + 'px; ' +
+      'top: ' + (pos.row * lh) + 'px; ' +
+      'width: ' + Math.max(1, Math.round(cw)) + 'px; ' +
+      'height: ' + lh + 'px; ' +
+      'pointer-events: none;'
+    );
   };
   return <div class="cursor" style={style()} />;
+}
+
+function Selection(props) {
+  // Render a selection range as up to three rectangles: a partial top
+  // line, a full middle block, and a partial bottom line. Matches what
+  // CodeMirror / the legacy editor draw.
+  const rects = createMemo(() => {
+    const range = props.range;
+    if (!range || range.isEmpty()) return [];
+    const lh = props.lineHeight();
+    const cw = props.charWidth();
+    if (!lh || !cw) return [];
+    const startRow = range.start.row;
+    const endRow = range.end.row;
+    const startCol = range.start.column;
+    const endCol = range.end.column;
+    const out = [];
+    if (startRow === endRow) {
+      out.push({
+        top: startRow * lh,
+        left: startCol * cw,
+        width: Math.max(0, (endCol - startCol) * cw),
+        height: lh
+      });
+    } else {
+      // Top line: from startCol to end of line. We don't know the line's
+      // length in pixels here without a measurement; extend to the right
+      // edge of the content area instead, which is what users expect.
+      out.push({
+        top: startRow * lh,
+        left: startCol * cw,
+        right: 0,
+        height: lh
+      });
+      if (endRow > startRow + 1) {
+        out.push({
+          top: (startRow + 1) * lh,
+          left: 0,
+          right: 0,
+          height: (endRow - startRow - 1) * lh
+        });
+      }
+      out.push({
+        top: endRow * lh,
+        left: 0,
+        width: endCol * cw,
+        height: lh
+      });
+    }
+    return out;
+  });
+  return (
+    <For each={rects()}>
+      {(r) => (
+        <div
+          class="selection"
+          style={
+            'position: absolute; ' +
+            'top: ' + r.top + 'px; ' +
+            'left: ' + r.left + 'px; ' +
+            (r.right != null ? 'right: ' + r.right + 'px; ' : '') +
+            (r.width != null ? 'width: ' + r.width + 'px; ' : '') +
+            'height: ' + r.height + 'px; ' +
+            'pointer-events: none;'
+          }
+        />
+      )}
+    </For>
+  );
 }
 
 function Editor(props) {
   const model = props.model;
   const component = props.component;
+  const displayLayer = model.displayLayer;
 
   // --- reactive sources ---
 
-  // Bumped by didChangeDisplayLayer / didResetDisplayLayer.
   const [displayVersion, bumpDisplayVersion] = createSignal(0);
-  component._notifyDisplayChange = () =>
-    bumpDisplayVersion(v => v + 1);
+  component._notifyDisplayChange = () => bumpDisplayVersion((v) => v + 1);
 
-  // Bumped by didChangeSelectionRange / didUpdateSelections.
-  const [cursorPos, setCursorPos] = createSignal(
-    model.getCursorScreenPosition()
-  );
+  const [selectionsVersion, bumpSelectionsVersion] = createSignal(0);
   component._notifySelectionChange = () =>
-    setCursorPos(model.getCursorScreenPosition());
+    bumpSelectionsVersion((v) => v + 1);
 
-  // Measurements (filled in onMount).
+  const [scrollTop, setScrollTop] = createSignal(0);
+  const [scrollLeft, setScrollLeft] = createSignal(0);
+  component._setScrollTopSignal = setScrollTop;
+  component._setScrollLeftSignal = setScrollLeft;
+
   const [lineHeight, setLineHeight] = createSignal(0);
   const [charWidth, setCharWidth] = createSignal(0);
+
+  const [blinkOff, setBlinkOff] = createSignal(false);
+  component._pauseBlinkAndShow = () => {
+    setBlinkOff(false);
+    component._restartBlinkInterval();
+  };
 
   // --- derived data ---
 
   const screenLines = createMemo(() => {
-    displayVersion(); // dependency
+    displayVersion();
     const count = model.getScreenLineCount();
     const arr = new Array(count);
     for (let i = 0; i < count; i++) {
@@ -112,40 +264,105 @@ function Editor(props) {
     return arr;
   });
 
-  // --- mount ---
+  const cursorPositions = createMemo(() => {
+    selectionsVersion();
+    const cursors = model.getCursors();
+    return cursors.map((c) => c.getScreenPosition());
+  });
+
+  const selectionRanges = createMemo(() => {
+    selectionsVersion();
+    const selections = model.getSelections();
+    return selections.map((s) => s.getScreenRange());
+  });
+
+  // --- mount / measure ---
 
   let measureRef;
+  let scrollerRef;
+  let linesRef;
+
   const measure = () => {
     if (!measureRef) return false;
     const sample = measureRef.querySelector('.measurement-sample');
     if (!sample) return false;
     const rect = sample.getBoundingClientRect();
-    // `sample` contains exactly one 'x' character. Its rendered width
-    // is the base char width; its height is the line height.
     if (!rect.width || !rect.height) return false;
-    setCharWidth(rect.width);
-    setLineHeight(rect.height);
-    component._lineHeight = rect.height;
-    component._charWidth = rect.width;
-    // eslint-disable-next-line no-console
-    console.info(
-      '[pulsar-text-editor] measured lineHeight=' + rect.height +
-      ' charWidth=' + rect.width
-    );
+    // The sample contains exactly 100 'x's so we average across them and
+    // avoid the per-character subpixel rounding error that made the
+    // single-character measurement drift visibly at column ~40+.
+    const cw = rect.width / 100;
+    const lh = rect.height;
+    setCharWidth(cw);
+    setLineHeight(lh);
+    component._lineHeight = lh;
+    component._charWidth = cw;
     return true;
   };
+
   onMount(() => {
-    // First attempt: synchronous after mount. If fonts haven't fully
-    // loaded yet, the rect may be 0 — retry on `document.fonts.ready`
-    // and on the next frame as a fallback.
-    if (measure()) return;
-    if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(measure);
+    component._scroller = scrollerRef;
+    component._linesEl = linesRef;
+    if (!measure()) {
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(measure);
+      }
+      requestAnimationFrame(() => {
+        if (!component._lineHeight) measure();
+      });
     }
-    requestAnimationFrame(() => {
-      if (component._lineHeight) return;
-      measure();
-    });
+    // Wire the scroll container's scroll position back into our signals
+    // so cursor / selection coordinates and the future virtualization
+    // stay in sync with the actual viewport.
+    const onScroll = () => {
+      setScrollTop(scrollerRef.scrollTop);
+      setScrollLeft(scrollerRef.scrollLeft);
+      component.scrollTop = scrollerRef.scrollTop;
+      component.scrollLeft = scrollerRef.scrollLeft;
+    };
+    scrollerRef.addEventListener('scroll', onScroll, { passive: true });
+    onCleanup(() => scrollerRef.removeEventListener('scroll', onScroll));
+  });
+
+  // --- blinking ---
+
+  let blinkInterval = null;
+  let resumeTimeout = null;
+  const restartBlinkInterval = () => {
+    if (blinkInterval) clearInterval(blinkInterval);
+    if (resumeTimeout) clearTimeout(resumeTimeout);
+    setBlinkOff(false);
+    // Pause briefly then start the periodic toggle, so the cursor stays
+    // solid right after a selection change and the user can see where it
+    // landed.
+    resumeTimeout = setTimeout(() => {
+      blinkInterval = setInterval(() => {
+        if (!component.focused || !component.attached) return;
+        setBlinkOff((v) => !v);
+      }, CURSOR_BLINK_PERIOD / 2);
+    }, CURSOR_BLINK_RESUME_DELAY);
+  };
+  component._restartBlinkInterval = restartBlinkInterval;
+  onMount(() => restartBlinkInterval());
+  onCleanup(() => {
+    if (blinkInterval) clearInterval(blinkInterval);
+    if (resumeTimeout) clearTimeout(resumeTimeout);
+  });
+
+  // --- content size ---
+
+  const contentHeight = createMemo(
+    () => screenLines().length * (lineHeight() || 0)
+  );
+  const contentWidth = createMemo(() => {
+    // Approximate the content width from the model's longest line; we'll
+    // refine this later by measuring rendered widths.
+    const cw = charWidth();
+    if (!cw) return 0;
+    const longest = model.getMaxScreenLineLength
+      ? model.getMaxScreenLineLength()
+      : 0;
+    return Math.max(longest * cw, 0);
   });
 
   // --- render ---
@@ -153,27 +370,79 @@ function Editor(props) {
   return (
     <div
       class="pulsar-editor-root"
-      style="position: relative; font-family: monospace; white-space: pre; overflow: auto; height: 100%; box-sizing: border-box;"
+      style={
+        'position: relative; width: 100%; height: 100%; ' +
+        'overflow: hidden; box-sizing: border-box; ' +
+        'font-family: monospace; white-space: pre;'
+      }
     >
       <div
-        ref={el => (measureRef = el)}
+        ref={(el) => (measureRef = el)}
         class="measurements"
         aria-hidden="true"
-        style="position: absolute; left: -9999px; top: 0; visibility: hidden; pointer-events: none;"
+        style={
+          'position: absolute; left: -9999px; top: 0; ' +
+          'visibility: hidden; pointer-events: none; white-space: pre;'
+        }
       >
-        <span class="measurement-sample">x</span>
+        <span class="measurement-sample">{'x'.repeat(100)}</span>
       </div>
-      <div class="lines" style="position: relative;">
-        <For each={screenLines()}>
-          {(line, i) => (
-            <Line lineText={line && line.lineText} row={i()} />
-          )}
-        </For>
-        <Cursor
-          position={cursorPos}
-          lineHeight={lineHeight}
-          charWidth={charWidth}
-        />
+      <div
+        ref={(el) => (scrollerRef = el)}
+        class="scroll-view"
+        style={
+          'position: absolute; inset: 0; overflow: auto; ' +
+          'will-change: scroll-position;'
+        }
+      >
+        <div
+          ref={(el) => (linesRef = el)}
+          class="lines"
+          style={
+            'position: relative; ' +
+            'width: ' + Math.max(contentWidth(), 1) + 'px; ' +
+            'height: ' + Math.max(contentHeight(), 1) + 'px;'
+          }
+        >
+          <For each={screenLines()}>
+            {(line, i) => (
+              <Line
+                screenLine={line}
+                displayLayer={displayLayer}
+                row={i()}
+                lineHeight={lineHeight()}
+              />
+            )}
+          </For>
+          <div
+            class={'selections' + (blinkOff() ? ' blink-off' : '')}
+            style="position: absolute; inset: 0; pointer-events: none;"
+          >
+            <For each={selectionRanges()}>
+              {(range) => (
+                <Selection
+                  range={range}
+                  lineHeight={lineHeight}
+                  charWidth={charWidth}
+                />
+              )}
+            </For>
+          </div>
+          <div
+            class={'cursors' + (blinkOff() ? ' blink-off' : '')}
+            style="position: absolute; inset: 0; pointer-events: none;"
+          >
+            <For each={cursorPositions()}>
+              {(pos) => (
+                <Cursor
+                  position={pos}
+                  lineHeight={lineHeight}
+                  charWidth={charWidth}
+                />
+              )}
+            </For>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -184,21 +453,18 @@ function Editor(props) {
 class PulsarTextEditorComponent {
   // --- Static API -------------------------------------------------------
 
-  // Deprecated no-ops kept for ABI compatibility. Solid has no central
-  // scheduler; batching happens via Solid's `batch()` invoked from
-  // ViewRegistry's `updateDocument()` in a later commit.
   static setScheduler(_scheduler) {}
   static getScheduler() { return null; }
 
   static didUpdateStyles() {
     if (this.attachedComponents) {
-      this.attachedComponents.forEach(c => c.didUpdateStyles());
+      this.attachedComponents.forEach((c) => c.didUpdateStyles());
     }
   }
 
   static didUpdateScrollbarStyles() {
     if (this.attachedComponents) {
-      this.attachedComponents.forEach(c => c.didUpdateScrollbarStyles());
+      this.attachedComponents.forEach((c) => c.didUpdateScrollbarStyles());
     }
   }
 
@@ -219,7 +485,9 @@ class PulsarTextEditorComponent {
     if (this.props.element) {
       this.element = this.props.element;
     } else {
-      if (!TextEditorElement) TextEditorElement = require('../text-editor-element');
+      if (!TextEditorElement) {
+        TextEditorElement = require('../text-editor-element');
+      }
       this.element = TextEditorElement.createTextEditorElement();
     }
     this.element.initialize(this);
@@ -232,17 +500,22 @@ class PulsarTextEditorComponent {
     this.scrollLeft = 0;
     this.inputEnabled = true;
 
-    // Cached on mount by the Editor Solid component, used by
-    // `getLineHeight`/`getBaseCharacterWidth` and friends.
     this._lineHeight = 0;
     this._charWidth = 0;
 
-    // Set by the Editor Solid component to bump the relevant signals.
+    // Set by the Editor Solid component.
     this._notifyDisplayChange = null;
     this._notifySelectionChange = null;
+    this._setScrollTopSignal = null;
+    this._setScrollLeftSignal = null;
+    this._pauseBlinkAndShow = null;
+    this._restartBlinkInterval = null;
+    this._scroller = null;
+    this._linesEl = null;
+    this._activeItemSub = null;
 
-    // `<atom-text-editor>` may be created with prior children (e.g. an
-    // `initialText` text node from `textContent`). Clear them so the
+    // `<atom-text-editor>` may carry pre-existing children (e.g. the
+    // `initialText` text node from `textContent`); clear them so the
     // Solid root has a clean container.
     while (this.element.firstChild) {
       this.element.removeChild(this.element.firstChild);
@@ -256,16 +529,26 @@ class PulsarTextEditorComponent {
     this.hiddenInput.setAttribute('tabindex', '-1');
     this.hiddenInput.style.cssText =
       'position: absolute; width: 1px; height: 1px; opacity: 0; ' +
-      'padding: 0; border: 0; pointer-events: none;';
-    this.hiddenInput.addEventListener('input', this._onHiddenInputInput.bind(this));
-    this.hiddenInput.addEventListener('focus', this._onHiddenInputFocus.bind(this));
-    this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
+      'padding: 0; border: 0; pointer-events: none; z-index: 5;';
+    this.hiddenInput.addEventListener(
+      'input',
+      this._onHiddenInputInput.bind(this)
+    );
+    this.hiddenInput.addEventListener(
+      'focus',
+      this._onHiddenInputFocus.bind(this)
+    );
+    this.hiddenInput.addEventListener(
+      'blur',
+      this._onHiddenInputBlur.bind(this)
+    );
     this.element.appendChild(this.hiddenInput);
 
-    // Solid mount target. The Editor renders into this div.
+    // Solid mount target.
     this.solidHost = document.createElement('div');
     this.solidHost.classList.add('pulsar-text-editor-solid-host');
-    this.solidHost.style.cssText = 'display: block; width: 100%; height: 100%;';
+    this.solidHost.style.cssText =
+      'display: block; width: 100%; height: 100%;';
     this.element.appendChild(this.solidHost);
 
     this.disposeRender = render(
@@ -273,104 +556,157 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
-    // Focus management is delicate here. Atom's `<atom-pane>` has a
-    // capture-phase focus listener that calls `paneModel.focus()` →
-    // `activate()` → emits `did-activate`, and `PaneElement.activated()`
-    // conditionally focuses the pane element itself. There are several
-    // emit-subscribed paths that can end up calling `paneElement.focus()`
-    // synchronously *during* the focus event for our hidden input, with
-    // the net effect that focus is yanked out from under us and lands on
-    // `<atom-pane>`. The legacy Etch editor renders a deeper DOM that
-    // happens to side-step this, but the simplest reliable fix here is:
-    //
-    //   1. On mousedown (capture), focus the hidden input.
-    //   2. Defensively refocus on the next microtask, the next animation
-    //      frame, and a 0ms timeout — covering whichever async tier the
-    //      stealing path runs in.
-    //   3. Trap any `focusin` that lands on something inside the editor
-    //      that *isn't* the hidden input and snap focus back.
-    //
-    // `preventDefault` on mousedown stops the browser's own click-focus
-    // resolution from competing with us.
-    this._refocusHiddenInput = () => {
-      if (this.attached && document.activeElement !== this.hiddenInput) {
-        this.hiddenInput.focus();
+    // Focus interception. Override the host element's `focus()` so any
+    // upstream caller that focuses the editor (pane activation, tab
+    // switch, workspace.open, etc.) ends up at the hidden input. This
+    // is much more robust than chasing every individual focus path.
+    const originalElementFocus = this.element.focus.bind(this.element);
+    this.element.focus = (options) => {
+      if (this.hiddenInput) {
+        this.hiddenInput.focus(options);
+      } else {
+        originalElementFocus(options);
       }
     };
-    this.element.addEventListener('mousedown', event => {
-      if (event.target === this.hiddenInput) return;
-      event.preventDefault();
-      this.hiddenInput.focus();
-      Promise.resolve().then(this._refocusHiddenInput);
-      requestAnimationFrame(this._refocusHiddenInput);
-      setTimeout(this._refocusHiddenInput, 0);
-    }, true);
-    // `focusin` bubbles. If focus lands on our editor element itself
-    // (e.g., after `view.focus()` is called from `<atom-pane>`'s focus
-    // forwarding), redirect to the hidden input.
-    this.element.addEventListener('focusin', event => {
-      if (
-        event.target === this.element &&
-        document.activeElement !== this.hiddenInput
-      ) {
-        this.hiddenInput.focus();
-      }
-    });
+
+    // Mouse: clicks (or click+drag) inside the lines area position the
+    // cursor and start a selection. Clicks elsewhere in the editor
+    // shell still focus the input but don't move the cursor.
+    this.element.addEventListener(
+      'mousedown',
+      this._onMouseDown.bind(this),
+      true
+    );
+
+    // When the workspace's active pane item becomes our editor — e.g.
+    // because the user clicked our tab — focus the hidden input. This
+    // covers the case where `pane.activateItem()` runs without the
+    // pane already having focus, which would otherwise leave the new
+    // editor visible but not receiving keystrokes.
+    if (global.atom && global.atom.workspace) {
+      this._activeItemSub = global.atom.workspace.onDidChangeActivePaneItem(
+        (item) => {
+          if (
+            item === this.props.model &&
+            this.attached &&
+            document.activeElement !== this.hiddenInput
+          ) {
+            this.hiddenInput.focus();
+          }
+        }
+      );
+    }
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
-
-    // Diagnostic — visible in DevTools so we can confirm the swap
-    // fires and the Solid mount succeeded. Remove once stable.
-    // eslint-disable-next-line no-console
-    console.info(
-      '[pulsar-text-editor] mounted on',
-      this.element,
-      '(model:', this.props.model && this.props.model.id, ')'
-    );
   }
 
   // --- Hidden input handlers --------------------------------------------
 
   _onHiddenInputInput(event) {
-    // eslint-disable-next-line no-console
-    console.info(
-      '[pulsar-text-editor] input event data=', JSON.stringify(event.data),
-      'inputType=', event.inputType
-    );
     if (!this.inputEnabled) return;
-    // event.data is the inserted text for `insertText`,
-    // `insertFromPaste`, `insertCompositionText`, etc. Null for
-    // deletion-type inputs (which we don't expect here — Backspace
-    // is consumed by atom.keymaps before it reaches us).
     const text = event.data;
     if (text != null && text.length > 0) {
       this.props.model.insertText(text);
     }
-    // Clear so we never accumulate state in the input element.
     this.hiddenInput.value = '';
   }
 
   _onHiddenInputFocus() {
-    // eslint-disable-next-line no-console
-    console.info('[pulsar-text-editor] hidden input focus');
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
+      if (this._restartBlinkInterval) this._restartBlinkInterval();
     }
   }
 
   _onHiddenInputBlur(event) {
-    // eslint-disable-next-line no-console
-    console.info(
-      '[pulsar-text-editor] hidden input blur, relatedTarget=',
-      event && event.relatedTarget,
-      'activeElement=', document.activeElement
-    );
+    // If focus is moving to something inside our element (e.g. a child
+    // overlay we render later), don't treat it as a real blur.
+    if (
+      event.relatedTarget &&
+      this.element.contains(event.relatedTarget)
+    ) {
+      return;
+    }
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');
     }
+  }
+
+  // --- Mouse handling ---------------------------------------------------
+
+  _onMouseDown(event) {
+    if (event.button !== 0) return;
+    // Always grab focus on any click in the editor — even if it's on
+    // chrome that doesn't move the cursor.
+    if (document.activeElement !== this.hiddenInput) {
+      this.hiddenInput.focus({ preventScroll: true });
+    }
+    if (!this._linesEl || !this._lineHeight) return;
+    const linesRect = this._linesEl.getBoundingClientRect();
+    // Only treat clicks inside the lines area as cursor-positioning
+    // gestures. Clicks on (future) gutters / scrollbars fall through.
+    if (
+      event.clientX < linesRect.left ||
+      event.clientY < linesRect.top ||
+      event.clientX > linesRect.right ||
+      event.clientY > linesRect.bottom
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const screenPosition = this._screenPositionForMouseEvent(event);
+    const model = this.props.model;
+    if (event.shiftKey) {
+      model.selectToScreenPosition(screenPosition, { autoscroll: false });
+    } else if (event.detail === 2) {
+      model.setCursorScreenPosition(screenPosition, { autoscroll: false });
+      model.getLastSelection().selectWord({ autoscroll: false });
+    } else if (event.detail === 3) {
+      model.setCursorScreenPosition(screenPosition, { autoscroll: false });
+      model.getLastSelection().selectLine(null, { autoscroll: false });
+    } else {
+      model.setCursorScreenPosition(screenPosition, { autoscroll: false });
+    }
+
+    // Track drag for selection extension.
+    let dragging = false;
+    const onMove = (moveEvent) => {
+      dragging = true;
+      const pos = this._screenPositionForMouseEvent(moveEvent);
+      model.selectToScreenPosition(pos, {
+        suppressSelectionMerge: true,
+        autoscroll: false
+      });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp, true);
+      if (dragging) {
+        model.finalizeSelections();
+        model.mergeIntersectingSelections();
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp, true);
+  }
+
+  _screenPositionForMouseEvent(event) {
+    const linesRect = this._linesEl.getBoundingClientRect();
+    const lh = this._lineHeight;
+    const cw = this._charWidth;
+    const y = event.clientY - linesRect.top;
+    const x = event.clientX - linesRect.left;
+    const row = Math.max(0, Math.floor(y / lh));
+    const lineCount = this.props.model.getScreenLineCount();
+    const clampedRow = Math.min(row, lineCount - 1);
+    // Round to nearest column (so clicking just past mid-character lands
+    // after the character, like a normal text editor).
+    const col = Math.max(0, Math.round(x / cw));
+    return this.props.model.clipScreenPosition([clampedRow, col]);
   }
 
   // --- Update / lifecycle -----------------------------------------------
@@ -385,7 +721,7 @@ class PulsarTextEditorComponent {
 
   getNextUpdatePromise() {
     if (!this.nextUpdatePromise) {
-      this.nextUpdatePromise = new Promise(resolve => {
+      this.nextUpdatePromise = new Promise((resolve) => {
         this.resolveNextUpdatePromise = resolve;
       });
     }
@@ -405,6 +741,10 @@ class PulsarTextEditorComponent {
     if (PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents.delete(this);
     }
+    if (this._activeItemSub) {
+      this._activeItemSub.dispose();
+      this._activeItemSub = null;
+    }
     if (this.disposeRender) {
       this.disposeRender();
       this.disposeRender = null;
@@ -415,7 +755,6 @@ class PulsarTextEditorComponent {
   didHide() { this.visible = false; }
 
   didFocus() {
-    // Forward focus to the hidden input so keystrokes have a target.
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
@@ -439,7 +778,6 @@ class PulsarTextEditorComponent {
 
   didChangeDisplayLayer(_changes) {
     if (this._notifyDisplayChange) this._notifyDisplayChange();
-    // The cursor sits on top of the lines; a display change can move it.
     if (this._notifySelectionChange) this._notifySelectionChange();
   }
 
@@ -450,13 +788,80 @@ class PulsarTextEditorComponent {
 
   didChangeSelectionRange() {
     if (this._notifySelectionChange) this._notifySelectionChange();
+    if (this._pauseBlinkAndShow) this._pauseBlinkAndShow();
   }
 
   didUpdateSelections() {
     if (this._notifySelectionChange) this._notifySelectionChange();
+    if (this._pauseBlinkAndShow) this._pauseBlinkAndShow();
   }
 
-  didRequestAutoscroll(_scrollEvent) {}
+  didRequestAutoscroll(autoscroll) {
+    if (!autoscroll || !this._scroller || !this._lineHeight) return;
+    const { screenRange, options } = autoscroll;
+    if (!screenRange) return;
+    this._autoscrollVertically(screenRange, options);
+    this._autoscrollHorizontally(screenRange, options);
+  }
+
+  _autoscrollVertically(screenRange, options) {
+    const lh = this._lineHeight;
+    const startTop = screenRange.start.row * lh;
+    const endBottom = (screenRange.end.row + 1) * lh;
+    const viewportHeight = this._scroller.clientHeight;
+    const margin = this._verticalAutoscrollMargin() * lh;
+
+    let desiredTop = startTop - margin;
+    let desiredBottom = endBottom + margin;
+
+    if (options && options.center) {
+      const desiredCenter = (startTop + endBottom) / 2;
+      desiredTop = desiredCenter - viewportHeight / 2;
+      desiredBottom = desiredCenter + viewportHeight / 2;
+    }
+
+    if (desiredBottom > this._scroller.scrollTop + viewportHeight) {
+      this._scroller.scrollTop = desiredBottom - viewportHeight;
+    }
+    if (desiredTop < this._scroller.scrollTop) {
+      this._scroller.scrollTop = Math.max(0, desiredTop);
+    }
+  }
+
+  _autoscrollHorizontally(screenRange, options) {
+    const cw = this._charWidth;
+    if (!cw) return;
+    const startLeft = screenRange.start.column * cw;
+    const endRight = screenRange.end.column * cw;
+    const viewportWidth = this._scroller.clientWidth;
+    const margin = this._horizontalAutoscrollMargin() * cw;
+
+    let desiredLeft = Math.max(0, startLeft - margin);
+    let desiredRight = endRight + margin;
+
+    if (options && options.center) {
+      const desiredCenter = (startLeft + endRight) / 2;
+      desiredLeft = desiredCenter - viewportWidth / 2;
+      desiredRight = desiredCenter + viewportWidth / 2;
+    }
+
+    if (desiredRight > this._scroller.scrollLeft + viewportWidth) {
+      this._scroller.scrollLeft = desiredRight - viewportWidth;
+    }
+    if (desiredLeft < this._scroller.scrollLeft) {
+      this._scroller.scrollLeft = Math.max(0, desiredLeft);
+    }
+  }
+
+  _verticalAutoscrollMargin() {
+    const m = this.props.model && this.props.model.verticalScrollMargin;
+    return m != null ? m : DEFAULT_VERTICAL_SCROLL_MARGIN;
+  }
+
+  _horizontalAutoscrollMargin() {
+    const m = this.props.model && this.props.model.horizontalScrollMargin;
+    return m != null ? m : DEFAULT_HORIZONTAL_SCROLL_MARGIN;
+  }
 
   addBlockDecoration(_decoration) {}
   invalidateBlockDecorationDimensions() {}
@@ -471,8 +876,11 @@ class PulsarTextEditorComponent {
     };
   }
 
-  screenPositionForPixelPosition(_pixelPosition) {
-    return this.props.model.clipScreenPosition({ row: 0, column: 0 });
+  screenPositionForPixelPosition({ top, left }) {
+    if (!this._lineHeight) return this.props.model.clipScreenPosition([0, 0]);
+    const row = Math.max(0, Math.floor(top / this._lineHeight));
+    const col = Math.max(0, Math.round(left / (this._charWidth || 1)));
+    return this.props.model.clipScreenPosition([row, col]);
   }
 
   pixelRangeForScreenRange(range) {
@@ -484,11 +892,7 @@ class PulsarTextEditorComponent {
 
   renderedScreenLineForRow(_row) { return null; }
 
-  measureDimensions() {
-    // Measurements are taken in the Editor component's `onMount`.
-    // This is a no-op now; if a caller needs a refresh, future
-    // commits can re-run the measurement here.
-  }
+  measureDimensions() {}
 
   // --- Dimensions -------------------------------------------------------
 
@@ -520,40 +924,66 @@ class PulsarTextEditorComponent {
 
   // --- Scroll -----------------------------------------------------------
 
-  getScrollTop() { return this.scrollTop; }
+  getScrollTop() {
+    return this._scroller ? this._scroller.scrollTop : this.scrollTop;
+  }
   setScrollTop(top) {
-    this.scrollTop = Math.max(0, top || 0);
-    return this.scrollTop;
+    const v = Math.max(0, top || 0);
+    this.scrollTop = v;
+    if (this._scroller) this._scroller.scrollTop = v;
+    return v;
   }
 
-  getScrollLeft() { return this.scrollLeft; }
+  getScrollLeft() {
+    return this._scroller ? this._scroller.scrollLeft : this.scrollLeft;
+  }
   setScrollLeft(left) {
-    this.scrollLeft = Math.max(0, left || 0);
-    return this.scrollLeft;
+    const v = Math.max(0, left || 0);
+    this.scrollLeft = v;
+    if (this._scroller) this._scroller.scrollLeft = v;
+    return v;
   }
 
-  getScrollBottom() { return this.scrollTop; }
-  setScrollBottom(_bottom) { return this.scrollTop; }
-  getScrollRight() { return this.scrollLeft; }
-  setScrollRight(_right) { return this.scrollLeft; }
+  getScrollBottom() {
+    return this.getScrollTop() + this.getClientContainerHeight();
+  }
+  setScrollBottom(bottom) {
+    return this.setScrollTop(bottom - this.getClientContainerHeight());
+  }
+  getScrollRight() {
+    return this.getScrollLeft() + this.getClientContainerWidth();
+  }
+  setScrollRight(right) {
+    return this.setScrollLeft(right - this.getClientContainerWidth());
+  }
 
   getScrollHeight() { return this.getContentHeight(); }
   getScrollWidth() { return this.getContentWidth(); }
   getMaxScrollTop() {
-    return Math.max(0, this.getScrollHeight() - this.getClientContainerHeight());
+    return Math.max(
+      0,
+      this.getScrollHeight() - this.getClientContainerHeight()
+    );
   }
   getMaxScrollLeft() {
-    return Math.max(0, this.getScrollWidth() - this.getClientContainerWidth());
+    return Math.max(
+      0,
+      this.getScrollWidth() - this.getClientContainerWidth()
+    );
   }
 
   getScrollTopRow() {
-    return this._lineHeight ? Math.floor(this.scrollTop / this._lineHeight) : 0;
+    return this._lineHeight
+      ? Math.floor(this.getScrollTop() / this._lineHeight)
+      : 0;
   }
   setScrollTopRow(row) {
     if (this._lineHeight) this.setScrollTop(row * this._lineHeight);
   }
   getScrollLeftColumn() {
-    return this._charWidth ? Math.floor(this.scrollLeft / this._charWidth) : 0;
+    return this._charWidth
+      ? Math.floor(this.getScrollLeft() / this._charWidth)
+      : 0;
   }
   setScrollLeftColumn(column) {
     if (this._charWidth) this.setScrollLeft(column * this._charWidth);
@@ -561,14 +991,13 @@ class PulsarTextEditorComponent {
 
   // --- Viewport ---------------------------------------------------------
 
-  // We don't virtualize yet, so the rendered range is the entire buffer.
   getFirstVisibleRow() { return this.getScrollTopRow(); }
   getLastVisibleRow() {
     const lh = this._lineHeight;
     if (!lh) return 0;
     return Math.min(
       this.props.model.getScreenLineCount() - 1,
-      Math.floor((this.scrollTop + this.getClientContainerHeight()) / lh)
+      Math.floor((this.getScrollTop() + this.getClientContainerHeight()) / lh)
     );
   }
   getFirstVisibleColumn() { return this.getScrollLeftColumn(); }
