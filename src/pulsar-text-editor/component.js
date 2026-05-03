@@ -248,22 +248,39 @@ function SelectionHighlight(props) {
 // Absolute-positioned cursor bar. Uses CSS `border-left` for the
 // visible caret; opacity is controlled by `.is-focused .cursor` and
 // `.cursors.blink-off .cursor` in core-ui/text-editor.less.
+//
+// `extraClass` and `extraStyle` come from `type: 'cursor'` decorations
+// merged across the cursor's marker (vim-mode-plus uses these to shift
+// the block cursor back inside the selection in visual mode, etc.).
+//
+// Positioning composition (matches legacy editor behavior):
+//   * Base position is set via `transform: translate(...)` so it does
+//     not collide with the decoration's `top` / `left` properties.
+//   * The decoration's `top` / `left` (cursor-style-manager passes
+//     deltas like `{ top: lineHeight * dRow + 'px', left: dCol + 'ch' }`)
+//     then act as additional offsets, since `top`/`left` apply on top
+//     of an already-translated absolutely-positioned element.
+//   * Other style props (`visibility`, `width`, `background`, etc.) are
+//     applied verbatim, overriding base values where they conflict.
 function CursorBar(props) {
   const style = () => {
     const lh = props.lineHeight();
     const cw = props.charWidth();
-    if (!lh || !cw) return 'display: none;';
+    if (!lh || !cw) return { display: 'none' };
     const pos = props.position;
-    if (!pos) return 'display: none;';
-    return (
-      'position: absolute; ' +
-      'left: ' + (pos.column * cw) + 'px; ' +
-      'top: ' + (pos.row * lh) + 'px; ' +
-      'width: ' + cw + 'px; ' +
-      'height: ' + lh + 'px;'
-    );
+    if (!pos) return { display: 'none' };
+    const base = {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: cw + 'px',
+      height: lh + 'px',
+      transform: 'translate(' + (pos.column * cw) + 'px, ' + (pos.row * lh) + 'px)'
+    };
+    return props.extraStyle ? Object.assign(base, props.extraStyle) : base;
   };
-  return <div class="cursor" style={style()} />;
+  const cls = () => 'cursor' + (props.extraClass ? ' ' + props.extraClass : '');
+  return <div class={cls()} style={style()} />;
 }
 
 // Top-level editor component.
@@ -279,6 +296,12 @@ function Editor(props) {
 
   const [selectionsVersion, bumpSelections] = createSignal(0);
   component._notifySelectionChange = () => bumpSelections((v) => v + 1);
+
+  // Bumped when any decoration is added/removed/updated on the model.
+  // Drives cursor decoration merge (vim-mode-plus block-cursor style),
+  // and will drive line-class / highlight decorations as those land.
+  const [decorationsVersion, bumpDecorations] = createSignal(0);
+  component._notifyDecorationsChange = () => bumpDecorations((v) => v + 1);
 
   // scrollTop and scrollLeft are kept in sync with the scroller DOM
   // element via a scroll event listener installed in onMount.
@@ -317,10 +340,22 @@ function Editor(props) {
 
   // --- derived data ---
 
-  const totalScreenRows = createMemo(() => {
+  // Guard against memos firing after the model has been destroyed.
+  // `model.destroy()` runs `displayLayer.destroy()` before emitting
+  // `did-destroy`, and ResizeObserver / scroll callbacks can fire
+  // synchronously during the surrounding DOM teardown. Calling
+  // `bufferRowForScreenRow` (or any display-layer query) on a destroyed
+  // layer trips its `Invalid translated buffer row` assertion. Every
+  // memo that talks to the display layer checks this first; once it's
+  // false we leave previous values in place and rely on the model's
+  // `did-destroy` handler to dispose the Solid render shortly after.
+  const isModelAlive = () => !(model.isDestroyed && model.isDestroyed());
+
+  const totalScreenRows = createMemo((prev) => {
     displayVersion();
+    if (!isModelAlive()) return prev || 0;
     return model.getScreenLineCount();
-  });
+  }, 0);
 
   const firstRenderedRow = createMemo(() => {
     const lh = lineHeight();
@@ -347,8 +382,9 @@ function Editor(props) {
   });
 
   // Array of { row, screenLine } objects for visible rows.
-  const visibleScreenLines = createMemo(() => {
+  const visibleScreenLines = createMemo((prev) => {
     displayVersion();
+    if (!isModelAlive()) return prev || [];
     const first = firstRenderedRow();
     const last = lastRenderedRow();
     const arr = [];
@@ -356,11 +392,12 @@ function Editor(props) {
       arr.push({ row: r, screenLine: model.screenLineForScreenRow(r) });
     }
     return arr;
-  });
+  }, []);
 
   // Gutter data: same row range with buffer-row metadata.
-  const visibleRows = createMemo(() => {
+  const visibleRows = createMemo((prev) => {
     displayVersion();
+    if (!isModelAlive()) return prev || [];
     const first = firstRenderedRow();
     const last = lastRenderedRow();
     const count = last - first + 1;
@@ -382,12 +419,13 @@ function Editor(props) {
       prevBufRow = bufRow;
     }
     return rows;
-  });
+  }, []);
 
-  const maxDigits = createMemo(() => {
+  const maxDigits = createMemo((prev) => {
     displayVersion();
+    if (!isModelAlive()) return prev || 2;
     return Math.max(2, String(model.getLineCount()).length);
-  });
+  }, 2);
 
   const showLineNumbers = createMemo(() => {
     displayVersion();
@@ -405,23 +443,78 @@ function Editor(props) {
     return true;
   });
 
-  const cursorPositions = createMemo(() => {
+  // Build full cursor descriptors: position + merged class/style from
+  // any `type: 'cursor'` decorations attached to the cursor's marker.
+  // vim-mode-plus uses cursor decorations with `style: { top, left }`
+  // to shift the visible block cursor onto the head character of a
+  // visual-mode selection (otherwise the block paints one char past
+  // the highlighted text). Without this merge, packages that move or
+  // restyle the cursor via decorations have no effect.
+  const cursorDescriptors = createMemo((prev) => {
     selectionsVersion();
-    return model.getCursors().map((c) => c.getScreenPosition());
-  });
+    decorationsVersion();
+    displayVersion();
+    if (!isModelAlive()) return prev || [];
+    const cursors = model.getCursors();
+    if (cursors.length === 0) return [];
 
-  const selectionRanges = createMemo(() => {
+    let propsByMarker = null;
+    if (
+      model.decorationManager &&
+      model.decorationManager.decorationPropertiesByMarkerForScreenRowRange
+    ) {
+      const total = model.getScreenLineCount();
+      // Range covers every cursor row, not just the rendered viewport,
+      // because cursor decorations should apply to off-screen cursors too
+      // (multi-cursor edits can place cursors anywhere in the buffer).
+      propsByMarker = model.decorationManager.decorationPropertiesByMarkerForScreenRowRange(
+        0,
+        total
+      );
+    }
+
+    return cursors.map((c) => {
+      const position = c.getScreenPosition();
+      let extraClass = null;
+      let extraStyle = null;
+      if (propsByMarker) {
+        const decos = propsByMarker.get(c.getMarker());
+        if (decos) {
+          for (let i = 0; i < decos.length; i++) {
+            const d = decos[i];
+            if (!d) continue;
+            const type = d.type;
+            const isCursor = Array.isArray(type)
+              ? type.indexOf('cursor') !== -1
+              : type === 'cursor';
+            if (!isCursor) continue;
+            if (d.class) {
+              extraClass = extraClass ? extraClass + ' ' + d.class : d.class;
+            }
+            if (d.style) {
+              extraStyle = Object.assign(extraStyle || {}, d.style);
+            }
+          }
+        }
+      }
+      return { position, extraClass, extraStyle };
+    });
+  }, []);
+
+  const selectionRanges = createMemo((prev) => {
     selectionsVersion();
+    if (!isModelAlive()) return prev || [];
     return model.getSelections().map((s) => s.getScreenRange());
-  });
+  }, []);
 
   // Set of screen rows that have a cursor on them, for cursor-line class.
-  const cursorRows = createMemo(() => {
+  const cursorRows = createMemo((prev) => {
     selectionsVersion();
+    if (!isModelAlive()) return prev || new Set();
     const s = new Set();
     model.getCursors().forEach((c) => s.add(c.getScreenPosition().row));
     return s;
-  });
+  }, new Set());
 
   // --- measurement ---
 
@@ -649,10 +742,12 @@ function Editor(props) {
                 'pointer-events: none;'
               }
             >
-              <For each={cursorPositions()}>
-                {(pos) => (
+              <For each={cursorDescriptors()}>
+                {(c) => (
                   <CursorBar
-                    position={pos}
+                    position={c.position}
+                    extraClass={c.extraClass}
+                    extraStyle={c.extraStyle}
                     lineHeight={lineHeight}
                     charWidth={charWidth}
                   />
@@ -725,6 +820,7 @@ class PulsarTextEditorComponent {
     // Set by the Editor Solid component after it mounts.
     this._notifyDisplayChange = null;
     this._notifySelectionChange = null;
+    this._notifyDecorationsChange = null;
     this._setScrollTopSignal = null;
     this._setScrollLeftSignal = null;
     this._restartBlink = null;
@@ -733,6 +829,8 @@ class PulsarTextEditorComponent {
     this._blinkInterval = null;
     this._blinkResume = null;
     this._activeItemSub = null;
+    this._decorationsSub = null;
+    this._destroySub = null;
 
     // Clear any pre-existing children (e.g. initialText node).
     while (this.element.firstChild) {
@@ -829,6 +927,29 @@ class PulsarTextEditorComponent {
       this._placeholderSub = this.props.model.onDidChangePlaceholderText(() => {
         if (this._notifyPlaceholderChange) this._notifyPlaceholderChange();
       });
+    }
+
+    // Decoration updates: packages (vim-mode-plus, linter, etc.) add and
+    // mutate decorations independently of buffer/selection changes. Without
+    // this subscription, the cursor decoration merge wouldn't see the
+    // vim-mode-plus block-cursor reposition until the next selection change,
+    // leaving the cursor lagging by one event.
+    if (this.props.model.onDidUpdateDecorations) {
+      this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
+        if (this._notifyDecorationsChange) this._notifyDecorationsChange();
+      });
+    }
+
+    // When the model is destroyed (tab closed, pane closed, project
+    // close), tear the Solid render down. Without this, the resize and
+    // mutation observers wired up in `onMount` outlive the model — and
+    // the next time they fire, our memos call `bufferRowForScreenRow`
+    // on a destroyed display layer, tripping its
+    // `Invalid translated buffer row` assertion. Subscribing here keeps
+    // teardown ordered: model dies → we dispose the render → observers
+    // disconnect → no stale callbacks reach the dead model.
+    if (this.props.model.onDidDestroy) {
+      this._destroySub = this.props.model.onDidDestroy(() => this.destroy());
     }
 
     // For mini editors, mirror the legacy behavior: stamp a `mini`
@@ -1004,6 +1125,14 @@ class PulsarTextEditorComponent {
     if (this._placeholderSub) {
       this._placeholderSub.dispose();
       this._placeholderSub = null;
+    }
+    if (this._decorationsSub) {
+      this._decorationsSub.dispose();
+      this._decorationsSub = null;
+    }
+    if (this._destroySub) {
+      this._destroySub.dispose();
+      this._destroySub = null;
     }
     if (this.disposeRender) {
       this.disposeRender();
