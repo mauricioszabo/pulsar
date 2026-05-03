@@ -273,21 +273,49 @@ class PulsarTextEditorComponent {
       this.solidHost
     );
 
-    // Click anywhere inside the editor must drive focus to the hidden
-    // input. Relying on the element's own `focus` event (fired when the
-    // browser focuses `<atom-text-editor>` because of its `tabindex=-1`)
-    // is unreliable in Chromium when the click target is a deep
-    // descendant: sometimes the focus event doesn't fire, and even when
-    // it does, our chained `hiddenInput.focus()` can be undone by the
-    // browser's own click-focus resolution. Listening for `mousedown`
-    // on capture (so we run before the browser shifts focus) and
-    // explicitly focusing the input is deterministic.
+    // Focus management is delicate here. Atom's `<atom-pane>` has a
+    // capture-phase focus listener that calls `paneModel.focus()` →
+    // `activate()` → emits `did-activate`, and `PaneElement.activated()`
+    // conditionally focuses the pane element itself. There are several
+    // emit-subscribed paths that can end up calling `paneElement.focus()`
+    // synchronously *during* the focus event for our hidden input, with
+    // the net effect that focus is yanked out from under us and lands on
+    // `<atom-pane>`. The legacy Etch editor renders a deeper DOM that
+    // happens to side-step this, but the simplest reliable fix here is:
+    //
+    //   1. On mousedown (capture), focus the hidden input.
+    //   2. Defensively refocus on the next microtask, the next animation
+    //      frame, and a 0ms timeout — covering whichever async tier the
+    //      stealing path runs in.
+    //   3. Trap any `focusin` that lands on something inside the editor
+    //      that *isn't* the hidden input and snap focus back.
+    //
+    // `preventDefault` on mousedown stops the browser's own click-focus
+    // resolution from competing with us.
+    this._refocusHiddenInput = () => {
+      if (this.attached && document.activeElement !== this.hiddenInput) {
+        this.hiddenInput.focus();
+      }
+    };
     this.element.addEventListener('mousedown', event => {
       if (event.target === this.hiddenInput) return;
-      // Don't preventDefault — that would stop selection from working
-      // later when we add mouse-driven cursor positioning.
+      event.preventDefault();
       this.hiddenInput.focus();
+      Promise.resolve().then(this._refocusHiddenInput);
+      requestAnimationFrame(this._refocusHiddenInput);
+      setTimeout(this._refocusHiddenInput, 0);
     }, true);
+    // `focusin` bubbles. If focus lands on our editor element itself
+    // (e.g., after `view.focus()` is called from `<atom-pane>`'s focus
+    // forwarding), redirect to the hidden input.
+    this.element.addEventListener('focusin', event => {
+      if (
+        event.target === this.element &&
+        document.activeElement !== this.hiddenInput
+      ) {
+        this.hiddenInput.focus();
+      }
+    });
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
@@ -332,9 +360,13 @@ class PulsarTextEditorComponent {
     }
   }
 
-  _onHiddenInputBlur() {
+  _onHiddenInputBlur(event) {
     // eslint-disable-next-line no-console
-    console.info('[pulsar-text-editor] hidden input blur');
+    console.info(
+      '[pulsar-text-editor] hidden input blur, relatedTarget=',
+      event && event.relatedTarget,
+      'activeElement=', document.activeElement
+    );
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');
