@@ -297,13 +297,6 @@ class TextEditorElement extends HTMLElement {
         global.atom &&
         global.atom.config &&
         global.atom.config.get('core.useNewTextEditor') === true;
-      // eslint-disable-next-line no-console
-      console.info(
-        '[text-editor-element] core.useNewTextEditor =',
-        useNew,
-        '— instantiating',
-        useNew ? 'pulsar-text-editor' : 'TextEditorComponent (Etch)'
-      );
       const ComponentClass = useNew
         ? require('./pulsar-text-editor')
         : TextEditorComponent;
