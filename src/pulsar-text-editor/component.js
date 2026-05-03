@@ -977,10 +977,22 @@ class PulsarTextEditorComponent {
   }
 
   didDetach() {
+    // Detach is not a teardown signal — the workspace re-attaches the
+    // same `<atom-text-editor>` element when a pane split, dock toggle,
+    // or tab drag rewraps it in a new parent. If we disposed the Solid
+    // root here, the editor would come back blank after a split because
+    // `connectedCallback` only calls `didAttach()`, which doesn't render.
+    // Keep the Solid root, the model/workspace subscriptions, and the
+    // scroll/resize observers alive across detach so re-attach is a
+    // no-op visually. Final cleanup, if needed, lives in `destroy()`.
     this.attached = false;
     if (PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents.delete(this);
     }
+  }
+
+  destroy() {
+    this.didDetach();
     if (this._activeItemSub) {
       this._activeItemSub.dispose();
       this._activeItemSub = null;
