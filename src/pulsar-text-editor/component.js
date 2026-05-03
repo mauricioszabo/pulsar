@@ -30,7 +30,7 @@
 //    including leading is captured. Character width is averaged over
 //    100 characters to eliminate per-character subpixel rounding.
 
-const { render, For } = require('solid-js/web');
+const { render, For, Show } = require('solid-js/web');
 const {
   createSignal,
   createMemo,
@@ -374,6 +374,17 @@ function Editor(props) {
     return model.doesShowLineNumbers ? model.doesShowLineNumbers() : true;
   });
 
+  // Mini editors (find-and-replace input, autocomplete suggestion box,
+  // etc.) should not show the gutter at all.
+  const showGutter = createMemo(() => {
+    displayVersion();
+    if (model.isMini && model.isMini()) return false;
+    if (model.anyLineNumberGutterVisible) {
+      return model.anyLineNumberGutterVisible();
+    }
+    return true;
+  });
+
   const cursorPositions = createMemo(() => {
     selectionsVersion();
     return model.getCursors().map((c) => c.getScreenPosition());
@@ -414,6 +425,7 @@ function Editor(props) {
   onMount(() => {
     component._scroller = scrollerRef;
     component._linesWrapper = linesWrapperRef;
+    component._measure = measure;
 
     if (!measure()) {
       if (document.fonts && document.fonts.ready) {
@@ -433,15 +445,26 @@ function Editor(props) {
     };
     scrollerRef.addEventListener('scroll', onScroll, { passive: true });
 
-    // Resize observer to update viewport height.
+    // Resize observer to keep viewport height current AND to re-measure
+    // line height / char width when the user zooms (Cmd-+/-) or any
+    // styling change resizes the measurement sample. Without this, the
+    // cursor and line positions stay glued to the old metrics and drift
+    // away from the actual rendered text after a zoom.
     const ro = new ResizeObserver(() => {
       setViewportHeight(scrollerRef.clientHeight);
     });
     ro.observe(scrollerRef);
 
+    const measureRO = new ResizeObserver(() => { measure(); });
+    if (measureRef) {
+      const lineEl = measureRef.querySelector('.measure-line');
+      if (lineEl) measureRO.observe(lineEl);
+    }
+
     onCleanup(() => {
       scrollerRef.removeEventListener('scroll', onScroll);
       ro.disconnect();
+      measureRO.disconnect();
     });
   });
 
@@ -499,14 +522,16 @@ function Editor(props) {
           it syncs vertically through a CSS translateY in GutterContainer. */}
       <div style="display: flex; flex-direction: row; flex: 1; overflow: hidden; min-height: 0;">
 
-        <GutterContainer
-          scrollTop={scrollTop}
-          visibleRows={visibleRows}
-          topSpacer={topSpacer}
-          bottomSpacer={bottomSpacer}
-          showLineNumbers={showLineNumbers}
-          maxDigits={maxDigits}
-        />
+        <Show when={showGutter()}>
+          <GutterContainer
+            scrollTop={scrollTop}
+            visibleRows={visibleRows}
+            topSpacer={topSpacer}
+            bottomSpacer={bottomSpacer}
+            showLineNumbers={showLineNumbers}
+            maxDigits={maxDigits}
+          />
+        </Show>
 
         {/* Scroll-view: native overflow:auto handles both scrollbars.
             The lines-wrapper inside uses flow layout so each `.line`
@@ -517,10 +542,18 @@ function Editor(props) {
           class="scroll-view"
           style="flex: 1; overflow: auto; position: relative;"
         >
+          {/* `position: relative; z-index: 0` makes lines-wrapper a
+              stacking context so `.region`'s `z-index: -1` (from the
+              core CSS rule `.highlight .region`) only escapes far
+              enough to land BEHIND the line text, not behind the whole
+              page. Without an explicit stacking context the negative
+              z-index would either disappear (if a positioned ancestor
+              creates one anyway) or punch through to the body's
+              background. */}
           <div
             ref={(el) => (linesWrapperRef = el)}
             class="lines-wrapper"
-            style="position: relative; white-space: pre; min-width: 100%;"
+            style="position: relative; z-index: 0; white-space: pre; min-width: 100%;"
           >
             {/* Top spacer pushes the first rendered row to its correct
                 vertical position. */}
@@ -543,16 +576,18 @@ function Editor(props) {
             {/* Bottom spacer fills the remaining virtual height. */}
             <div style={`height: ${bottomSpacer()}px; display: block;`} />
 
-            {/* Overlay layers: selections + cursors. Both are absolutely
-                positioned with top:0 and cover the full content height
-                (all rows, not just the rendered window) so a cursor or
-                selection at any row is visible when scrolled there. */}
+            {/* Overlay layers: selections + cursors. Both span the full
+                content height so any row is reachable.  Note: NO
+                `overflow: hidden` here — that would create a local
+                stacking context and trap `.region`'s `z-index: -1`,
+                making selections paint ON TOP of the text instead of
+                behind it. */}
             <div
               class="highlights"
               style={
                 'position: absolute; top: 0; left: 0; right: 0; ' +
                 'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
-                'pointer-events: none; overflow: hidden;'
+                'pointer-events: none;'
               }
             >
               <For each={selectionRanges()}>
@@ -570,7 +605,7 @@ function Editor(props) {
               style={
                 'position: absolute; top: 0; left: 0; right: 0; ' +
                 'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
-                'pointer-events: none; overflow: hidden;'
+                'pointer-events: none;'
               }
             >
               <For each={cursorPositions()}>
@@ -720,6 +755,27 @@ class PulsarTextEditorComponent {
       );
     }
 
+    // TextMate grammars tokenize asynchronously. When tokenization
+    // completes for a previously-untokenized region, the screen lines
+    // already exist (lineText is set) but their `tags` array changes
+    // from "single big text run" to "scoped runs". The display layer's
+    // `onDidChange` only fires for layout-affecting changes (soft wrap,
+    // folds), so without this hook our highlighter would render plain
+    // text forever for SQL / shell / plain TextMate languages.
+    if (this.props.model.onDidTokenize) {
+      this._tokenizeSub = this.props.model.onDidTokenize(() => {
+        if (this._notifyDisplayChange) this._notifyDisplayChange();
+      });
+    }
+
+    // For mini editors, mirror the legacy behavior: stamp a `mini`
+    // attribute/class on the host element so the existing
+    // `atom-text-editor[mini]` CSS rules apply.
+    if (this.props.model.isMini && this.props.model.isMini()) {
+      this.element.setAttribute('mini', '');
+      this.element.classList.add('mini');
+    }
+
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
   }
@@ -866,6 +922,10 @@ class PulsarTextEditorComponent {
       this._activeItemSub.dispose();
       this._activeItemSub = null;
     }
+    if (this._tokenizeSub) {
+      this._tokenizeSub.dispose();
+      this._tokenizeSub = null;
+    }
     if (this.disposeRender) {
       this.disposeRender();
       this.disposeRender = null;
@@ -892,7 +952,13 @@ class PulsarTextEditorComponent {
     }
   }
 
-  didUpdateStyles() {}
+  // Called by the static `didUpdateStyles` (which Atom themes invoke
+  // when stylesheets change) — re-measure font metrics and force a
+  // re-render so cursor/line positions track the new sizes.
+  didUpdateStyles() {
+    if (this._measure) this._measure();
+    if (this._notifyDisplayChange) this._notifyDisplayChange();
+  }
   didUpdateScrollbarStyles() {}
 
   // --- Model callbacks --------------------------------------------------
