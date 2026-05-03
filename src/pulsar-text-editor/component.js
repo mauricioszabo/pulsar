@@ -605,18 +605,29 @@ function Editor(props) {
               </div>
             </Show>
 
-            {/* Overlay layers: selections + cursors. Both span the full
-                content height so any row is reachable.  Note: NO
-                `overflow: hidden` here — that would create a local
-                stacking context and trap `.region`'s `z-index: -1`,
-                making selections paint ON TOP of the text instead of
-                behind it. */}
+            {/* Overlay layers: selections + cursors.
+
+                Selection placement is subtle. The lines are
+                non-positioned blocks so they paint at step 3 of
+                `.lines-wrapper`'s stacking context. A naive
+                positioned `.highlights` would paint at step 6 — i.e.
+                ON TOP of the text — even with `.region`'s `z-index:
+                -1`, because `.region` only escapes its own contain-
+                created stacking context as far as `.highlights`,
+                which itself paints above the lines.
+
+                Solution: give `.highlights` explicit `z-index: -1`.
+                That promotes it to step 2 of `.lines-wrapper`'s
+                stacking context (behind non-positioned descendants),
+                and it carries its `.region` children with it.
+                Selections now paint behind the line text, matching
+                the legacy editor's behavior. */}
             <div
               class="highlights"
               style={
                 'position: absolute; top: 0; left: 0; right: 0; ' +
                 'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
-                'pointer-events: none;'
+                'pointer-events: none; z-index: -1;'
               }
             >
               <For each={selectionRanges()}>
