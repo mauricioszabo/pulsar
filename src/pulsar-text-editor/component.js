@@ -381,7 +381,22 @@ function Editor(props) {
     return Math.max(0, (total - 1 - last) * lh);
   });
 
-  // Array of { row, screenLine } objects for visible rows.
+  // Visible screen lines as { row, screenLine } wrappers, with stable
+  // identity across renders. `<For>` (used below) keys items by
+  // referential identity, so if we minted a fresh wrapper per row on
+  // every cycle each `<Line>` would unmount and remount on every
+  // tokenization event during initial open — that's what made opening
+  // a long file slow. `lineCache` reuses the wrapper for a given row
+  // as long as the underlying `screenLine` reference is the same; only
+  // when the display layer invalidates a row's cached screen line
+  // (a chunk re-tokenized) does that row get a fresh wrapper, which
+  // makes `<For>` swap the single Line that actually changed.
+  //
+  // Rows that have scrolled far out of view are pruned when the cache
+  // grows past `LINE_CACHE_SLACK` rows beyond the visible window, so
+  // memory stays bounded on huge files.
+  const lineCache = new Map();
+  const LINE_CACHE_SLACK = 200;
   const visibleScreenLines = createMemo((prev) => {
     displayVersion();
     if (!isModelAlive()) return prev || [];
@@ -389,12 +404,31 @@ function Editor(props) {
     const last = lastRenderedRow();
     const arr = [];
     for (let r = first; r <= last; r++) {
-      arr.push({ row: r, screenLine: model.screenLineForScreenRow(r) });
+      const screenLine = model.screenLineForScreenRow(r);
+      const cached = lineCache.get(r);
+      if (cached && cached.screenLine === screenLine) {
+        arr.push(cached);
+      } else {
+        const wrapper = { row: r, screenLine };
+        lineCache.set(r, wrapper);
+        arr.push(wrapper);
+      }
+    }
+    if (lineCache.size > (last - first + 1) + LINE_CACHE_SLACK) {
+      const keepFrom = first - LINE_CACHE_SLACK / 2;
+      const keepTo = last + LINE_CACHE_SLACK / 2;
+      for (const k of lineCache.keys()) {
+        if (k < keepFrom || k > keepTo) lineCache.delete(k);
+      }
     }
     return arr;
   }, []);
 
-  // Gutter data: same row range with buffer-row metadata.
+  // Gutter data: same row range with buffer-row metadata. Wrappers are
+  // cached per screenRow so `<For>` reuses gutter cells across renders
+  // unless the underlying buffer-row metadata for that row changes —
+  // mirrors the `lineCache` strategy used for the line list.
+  const gutterCache = new Map();
   const visibleRows = createMemo((prev) => {
     displayVersion();
     if (!isModelAlive()) return prev || [];
@@ -415,8 +449,27 @@ function Editor(props) {
       const foldable = !softWrapped &&
         bufRow !== nextBufRow &&
         model.isFoldableAtBufferRow(bufRow);
-      rows.push({ screenRow, bufferRow: bufRow, softWrapped, foldable });
+      const cached = gutterCache.get(screenRow);
+      if (
+        cached &&
+        cached.bufferRow === bufRow &&
+        cached.softWrapped === softWrapped &&
+        cached.foldable === foldable
+      ) {
+        rows.push(cached);
+      } else {
+        const wrapper = { screenRow, bufferRow: bufRow, softWrapped, foldable };
+        gutterCache.set(screenRow, wrapper);
+        rows.push(wrapper);
+      }
       prevBufRow = bufRow;
+    }
+    if (gutterCache.size > count + LINE_CACHE_SLACK) {
+      const keepFrom = first - LINE_CACHE_SLACK / 2;
+      const keepTo = last + LINE_CACHE_SLACK / 2;
+      for (const k of gutterCache.keys()) {
+        if (k < keepFrom || k > keepTo) gutterCache.delete(k);
+      }
     }
     return rows;
   }, []);
@@ -672,9 +725,17 @@ function Editor(props) {
                 vertical position. */}
             <div style={`height: ${topSpacer()}px; display: block;`} />
 
-            {/* Rendered lines in flow layout. Each `.line` is `display:
-                block` so its content width drives the scroll container
-                width. Syntax-highlighted spans nest inside. */}
+            {/* Rendered lines in flow layout. Each `.line` is
+                `display: block` so its content width drives the scroll
+                container width. Syntax-highlighted spans nest inside.
+                `<For>`'s identity-based diff plays correctly here only
+                because `visibleScreenLines()` caches its wrappers per
+                row (see `lineCache` above) — without that cache, every
+                tokenization event during initial open of a long file
+                tears down and re-creates every Line, which is what
+                made open slow. With caching, only the row whose
+                screenLine actually changed produces a new wrapper, so
+                `<For>` swaps just the affected `<Line>`. */}
             <For each={visibleScreenLines()}>
               {(item) => (
                 <Line
