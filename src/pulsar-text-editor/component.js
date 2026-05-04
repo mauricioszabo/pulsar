@@ -763,11 +763,28 @@ function Editor(props) {
   }, []);
 
   // Set of screen rows that have a cursor on them, for cursor-line class.
+  // Uses the descriptor's display row (after applying any top-delta decoration
+  // from vim-mode-plus) so that cursor-line follows the visual cursor, not the
+  // model cursor (which vim places one row past the selection end in linewise
+  // visual mode).
   const cursorRows = createMemo((prev) => {
-    selectionsVersion();
+    const descs = cursorDescriptors();
+    const lh = lineHeight();
     if (!isModelAlive()) return prev || new Set();
     const s = new Set();
-    model.getCursors().forEach((c) => s.add(c.getScreenPosition().row));
+    for (const { position, extraStyle } of descs) {
+      if (!position) continue;
+      let displayRow = position.row;
+      if (extraStyle && extraStyle.top != null && lh > 0) {
+        const v = extraStyle.top;
+        if (typeof v === 'string' && v.endsWith('px')) {
+          displayRow += Math.round(parseFloat(v) / lh);
+        } else if (typeof v === 'number') {
+          displayRow += Math.round(v / lh);
+        }
+      }
+      s.add(displayRow);
+    }
     return s;
   }, new Set());
 
