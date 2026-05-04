@@ -1789,7 +1789,7 @@ class PulsarTextEditorComponent {
     if (props.class) wrapperEl.classList.add(props.class);
     wrapperEl.style.cssText = 'position: fixed; z-index: 4;';
     wrapperEl.appendChild(itemEl);
-    document.body.appendChild(wrapperEl);
+    this.element.appendChild(wrapperEl);
 
     const resizeObserver = new ResizeObserver(() => {
       this._positionOverlay(decoration);
