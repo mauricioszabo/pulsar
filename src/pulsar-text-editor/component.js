@@ -832,6 +832,11 @@ function Editor(props) {
       setScrollLeft(sl);
       component.scrollTop = st;
       component.scrollLeft = sl;
+      // Reposition any floating overlay decorations (e.g. autocomplete list)
+      // when the scroller scrolls so they track their anchor position.
+      for (const decoration of component._overlays.keys()) {
+        component._positionOverlay(decoration);
+      }
     };
     scrollerRef.addEventListener('scroll', onScroll, { passive: true });
 
@@ -1122,6 +1127,15 @@ class PulsarTextEditorComponent {
     this._decorationsSub = null;
     this._destroySub = null;
 
+    // Overlay decorations: packages like autocomplete-plus use
+    // `editor.decorateMarker(marker, {type: 'overlay', item: el})`
+    // to display floating UI (suggestion list, etc.) anchored to a
+    // buffer position. We track each live overlay in a Map keyed by
+    // the decoration object so we can update position on scroll/resize
+    // and remove the DOM node when the decoration is destroyed.
+    // Map<Decoration, { wrapperEl, resizeObserver, markerSub, decorationSub }>
+    this._overlays = new Map();
+
     // Clear any pre-existing children (e.g. initialText node).
     while (this.element.firstChild) {
       this.element.removeChild(this.element.firstChild);
@@ -1170,9 +1184,10 @@ class PulsarTextEditorComponent {
     //      visible but unable to receive typing until the user clicks
     //      the editor.  Explicitly chaining `hiddenInput.focus()` here
     //      makes the open-and-type workflow Just Work.
-    const originalElementFocus = this.element.focus.bind(this.element);
     this.element.focus = (options) => {
-      originalElementFocus(options);
+      if (!this.focused) {
+        this.element.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false }));
+      }
       if (this.hiddenInput) {
         this.hiddenInput.focus(options || { preventScroll: true });
       }
@@ -1231,6 +1246,7 @@ class PulsarTextEditorComponent {
     if (this.props.model.onDidUpdateDecorations) {
       this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
         if (this._notifyDecorationsChange) this._notifyDecorationsChange();
+        this._syncOverlayDecorations();
       });
     }
 
@@ -1284,6 +1300,10 @@ class PulsarTextEditorComponent {
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');
+      // Dispatch a synthetic blur on atom-text-editor so packages listening
+      // there (autocomplete-plus blurListener → hideSuggestionList) know the
+      // editor has lost focus.
+      this.element.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false }));
     }
   }
 
@@ -1441,22 +1461,22 @@ class PulsarTextEditorComponent {
       this.disposeRender();
       this.disposeRender = null;
     }
+    this._destroyAllOverlays();
   }
 
   didShow() { this.visible = true; }
   didHide() { this.visible = false; }
 
   didFocus(event) {
+    // Called by text-editor-element's focus listener (which fires for both
+    // the synthetic focus event we dispatch in element.focus() and any
+    // native focus events). Just update state — do not forward to the hidden
+    // input here, because we are still inside the focus event dispatch and
+    // other listeners (autocomplete-plus etc.) haven't run yet.
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
-    }
-    // Forward focus to the hidden input so it can receive keystrokes.
-    // The element's `focus` event has already fired by the time we
-    // get here, so packages listening for it (autocomplete-plus, etc.)
-    // have observed activation before we redirect.
-    if (document.activeElement !== this.hiddenInput) {
-      this.hiddenInput.focus({ preventScroll: true });
+      if (this._restartBlink) this._restartBlink();
     }
   }
 
@@ -1726,6 +1746,136 @@ class PulsarTextEditorComponent {
   }
 
   queryDecorationsToRender() {}
+
+  // --- Overlay decorations -----------------------------------------------
+
+  _syncOverlayDecorations() {
+    const model = this.props.model;
+    if (!model || !model.decorationManager) return;
+
+    // Collect all live overlay decorations from the model.
+    const liveDecorations = new Set();
+    const allDecorations = model.decorationManager.getDecorations
+      ? model.decorationManager.getDecorations()
+      : [];
+    for (const decoration of allDecorations) {
+      if (!decoration.isType('overlay')) continue;
+      liveDecorations.add(decoration);
+      if (!this._overlays.has(decoration)) {
+        this._addOverlay(decoration);
+      } else {
+        this._positionOverlay(decoration);
+      }
+    }
+
+    // Remove overlays whose decorations no longer exist.
+    for (const [decoration, entry] of this._overlays) {
+      if (!liveDecorations.has(decoration)) {
+        this._removeOverlay(decoration, entry);
+      }
+    }
+  }
+
+  _addOverlay(decoration) {
+    const props = decoration.getProperties ? decoration.getProperties() : decoration.properties;
+    if (!props) return;
+    const item = props.item;
+    if (!item) return;
+
+    const itemEl = item.element || item;
+    if (!itemEl || typeof itemEl !== 'object' || !itemEl.appendChild) return;
+
+    const wrapperEl = document.createElement('atom-overlay');
+    if (props.class) wrapperEl.classList.add(props.class);
+    wrapperEl.style.cssText = 'position: fixed; z-index: 4;';
+    wrapperEl.appendChild(itemEl);
+    document.body.appendChild(wrapperEl);
+
+    const resizeObserver = new ResizeObserver(() => {
+      this._positionOverlay(decoration);
+    });
+    resizeObserver.observe(itemEl);
+
+    // Listen for the decoration being destroyed so we remove the overlay.
+    let destroySub = null;
+    if (decoration.onDidDestroy) {
+      destroySub = decoration.onDidDestroy(() => {
+        const entry = this._overlays.get(decoration);
+        if (entry) this._removeOverlay(decoration, entry);
+      });
+    }
+
+    // Listen for marker changes so we reposition the overlay.
+    let markerSub = null;
+    const marker = decoration.getMarker ? decoration.getMarker() : null;
+    if (marker && marker.onDidChange) {
+      markerSub = marker.onDidChange(() => this._positionOverlay(decoration));
+    }
+
+    this._overlays.set(decoration, { wrapperEl, resizeObserver, destroySub, markerSub });
+    this._positionOverlay(decoration);
+  }
+
+  _positionOverlay(decoration) {
+    const entry = this._overlays.get(decoration);
+    if (!entry) return;
+    const { wrapperEl } = entry;
+
+    const props = decoration.getProperties ? decoration.getProperties() : decoration.properties;
+    if (!props) return;
+    const marker = decoration.getMarker ? decoration.getMarker() : null;
+    if (!marker) return;
+
+    const screenPosition = props.position === 'tail'
+      ? marker.getTailScreenPosition()
+      : marker.getHeadScreenPosition();
+
+    const lh = this._lineHeight;
+    const cw = this._charWidth;
+    if (!lh || !cw || !this._scroller) return;
+
+    const scrollerRect = this._scroller.getBoundingClientRect();
+    const pixelTop = screenPosition.row * lh - this._scroller.scrollTop;
+    const pixelLeft = screenPosition.column * cw - this._scroller.scrollLeft;
+
+    let top = scrollerRect.top + pixelTop + lh;
+    let left = scrollerRect.left + pixelLeft;
+
+    // Avoid overflow off bottom of window.
+    const itemEl = wrapperEl.firstChild;
+    if (itemEl) {
+      const itemRect = itemEl.getBoundingClientRect();
+      const windowH = window.innerHeight;
+      const windowW = window.innerWidth;
+      if (top + itemRect.height > windowH) {
+        const flippedTop = scrollerRect.top + pixelTop - itemRect.height;
+        if (flippedTop >= 0) top = flippedTop;
+      }
+      if (left + itemRect.width > windowW) {
+        left = Math.max(0, windowW - itemRect.width);
+      }
+      if (left < 0) left = 0;
+    }
+
+    wrapperEl.style.top = Math.round(top) + 'px';
+    wrapperEl.style.left = Math.round(left) + 'px';
+  }
+
+  _removeOverlay(decoration, entry) {
+    if (!entry) return;
+    const { wrapperEl, resizeObserver, destroySub, markerSub } = entry;
+    resizeObserver.disconnect();
+    if (destroySub) destroySub.dispose();
+    if (markerSub) markerSub.dispose();
+    if (wrapperEl.parentNode) wrapperEl.parentNode.removeChild(wrapperEl);
+    this._overlays.delete(decoration);
+  }
+
+  _destroyAllOverlays() {
+    for (const [decoration, entry] of this._overlays) {
+      this._removeOverlay(decoration, entry);
+    }
+  }
 }
 
 PulsarTextEditorComponent.attachedComponents = null;
