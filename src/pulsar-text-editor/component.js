@@ -377,8 +377,12 @@ function Editor(props) {
     if (!buffer) return false;
     if (model.isSoftWrapped && model.isSoftWrapped()) return false;
     // If folds are present the screen-line text contains the fold marker
-    // glyph, which differs from buffer text.
-    if (displayLayer.foldsMarkerLayer && displayLayer.foldsMarkerLayer.findMarkers().length > 0) {
+    // glyph, which differs from buffer text — we'd render the un-folded
+    // text and the visible position would drift away from screen
+    // coordinates. `getMarkerCount()` is O(1); `findMarkers()` requires
+    // a params object and is O(N).
+    const folds = displayLayer.foldsMarkerLayer;
+    if (folds && folds.getMarkerCount && folds.getMarkerCount() > 0) {
       return false;
     }
     return true;
