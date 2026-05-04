@@ -268,7 +268,11 @@ function LineNumber(props) {
   const cls = () => {
     let c = 'line-number';
     if (props.foldable) c += ' foldable';
-    if (props.extraClass) c += ' ' + props.extraClass;
+    // line-number decorations (e.g. 'folded' from the folds marker layer)
+    const decoClass = props.lineNumberDecoClasses
+      ? props.lineNumberDecoClasses().get(props.row)
+      : null;
+    if (decoClass) c += ' ' + decoClass;
     return c;
   };
   // Number string: right-padded with NBSP to maxDigits width; soft-wrapped
@@ -290,10 +294,44 @@ function LineNumber(props) {
 // so it doesn't scroll horizontally. Vertical sync is achieved by applying
 // translateY(-scrollTop) to the inner content, exactly as the legacy editor
 // does.  The container clips content with `overflow: hidden`.
+//
+// Block decorations push lines down in the content area, so the gutter must
+// insert matching spacer divs between line numbers so they stay aligned.
+// We also expose the inner `.gutter` element via `props.gutterRef` so the
+// scroll handler can update its transform imperatively (same frame as the
+// scroll event, no SolidJS re-render lag) to prevent the one-frame shaking
+// that results from the signal-driven translateY path.
+//
+// The flat item list merges visibleRows and sortedBlocks into a single
+// memo so any change to either (new block added, block resized, row
+// scrolled into view) triggers exactly one re-render of the <For>.
 function GutterContainer(props) {
-  // `props.scrollTop`, `props.topSpacer`, `props.bottomSpacer`,
-  // `props.visibleRows`, `props.showLineNumbers`, `props.maxDigits`
-  // are all accessor functions (memos / signals from Editor).
+  // Flat list of gutter items: { type: 'line', ...rowData } or
+  // { type: 'block', height }.  Built as a memo so it reacts to both
+  // visibleRows and sortedBlocks changes.
+  const gutterItems = createMemo(() => {
+    const rows = props.visibleRows();
+    const blocks = props.sortedBlocks();
+    const items = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      for (let j = 0; j < blocks.length; j++) {
+        const b = blocks[j];
+        if (b.row === row.screenRow && b.position === 'before') {
+          items.push({ type: 'block', height: b.height, key: b });
+        }
+      }
+      items.push({ type: 'line', ...row });
+      for (let j = 0; j < blocks.length; j++) {
+        const b = blocks[j];
+        if (b.row === row.screenRow && b.position === 'after') {
+          items.push({ type: 'block', height: b.height, key: b });
+        }
+      }
+    }
+    return items;
+  });
+
   return (
     <div
       class="gutter-container"
@@ -303,6 +341,7 @@ function GutterContainer(props) {
       }
     >
       <div
+        ref={props.gutterRef}
         class="gutter line-numbers"
         style={
           'will-change: transform; ' +
@@ -310,16 +349,19 @@ function GutterContainer(props) {
         }
       >
         <div style={`height: ${props.topSpacer()}px; display: block;`} />
-        <For each={props.visibleRows()}>
+        <For each={gutterItems()}>
           {(item) => (
-            <LineNumber
-              row={item.screenRow}
-              bufferRow={item.bufferRow}
-              softWrapped={item.softWrapped}
-              foldable={item.foldable}
-              showLineNumbers={props.showLineNumbers()}
-              maxDigits={props.maxDigits()}
-            />
+            item.type === 'block'
+              ? <div style={`height: ${item.height}px; display: block;`} />
+              : <LineNumber
+                  row={item.screenRow}
+                  bufferRow={item.bufferRow}
+                  softWrapped={item.softWrapped}
+                  foldable={item.foldable}
+                  lineNumberDecoClasses={props.lineNumberDecoClasses}
+                  showLineNumbers={props.showLineNumbers()}
+                  maxDigits={props.maxDigits()}
+                />
           )}
         </For>
         <div style={`height: ${props.bottomSpacer()}px; display: block;`} />
@@ -617,6 +659,7 @@ function Editor(props) {
   let scrollerRef;
   let linesWrapperRef;
   let bottomSpacerRef;
+  let gutterInnerRef;
 
   // --- derived data ---
 
@@ -637,10 +680,38 @@ function Editor(props) {
     return model.getScreenLineCount();
   }, 0);
 
+  // Given a pixel offset from the top of the content, return the screen row
+  // that contains that pixel. Block decorations make this non-linear: each
+  // block adds height between rows, so we walk sortedBlocks to accumulate
+  // the extra offset and find the right row.
+  const rowAtPixel = (pixel) => {
+    const lh = lineHeight();
+    if (!lh) return 0;
+    const total = totalScreenRows();
+    const blocks = sortedBlocks(); // tracked as reactive dependency
+    let extraSoFar = 0;
+    let bi = 0;
+    for (let row = 0; row < total; row++) {
+      // Consume 'before' blocks at this row — they sit above the line.
+      while (bi < blocks.length && blocks[bi].row === row && blocks[bi].position === 'before') {
+        extraSoFar += blocks[bi].height;
+        bi++;
+      }
+      // Consume 'after' blocks at this row — they sit below the line.
+      while (bi < blocks.length && blocks[bi].row === row && blocks[bi].position === 'after') {
+        extraSoFar += blocks[bi].height;
+        bi++;
+      }
+      // Bottom edge of this row (including its after-blocks).
+      if (pixel < (row + 1) * lh + extraSoFar) return row;
+    }
+    return Math.max(0, total - 1);
+  };
+
   const firstRenderedRow = createMemo(() => {
     const lh = lineHeight();
     if (!lh) return 0;
-    return Math.max(0, Math.floor(scrollTop() / lh) - OVERSCAN);
+    return Math.max(0, rowAtPixel(scrollTop()) - OVERSCAN);
   });
 
   const lastRenderedRow = createMemo(() => {
@@ -648,7 +719,7 @@ function Editor(props) {
     const total = totalScreenRows();
     if (!lh) return Math.min(total - 1, OVERSCAN * 2);
     const viewH = viewportHeight() || (scrollerRef ? scrollerRef.clientHeight : 0);
-    return Math.min(total - 1, Math.ceil((scrollTop() + viewH) / lh) + OVERSCAN);
+    return Math.min(total - 1, rowAtPixel(scrollTop() + viewH) + OVERSCAN);
   });
 
   // [startCol, endCol] for column-range virtualization on long lines.
@@ -720,6 +791,10 @@ function Editor(props) {
   };
   // Expose for imperative callers (`pixelPositionForScreenPosition`).
   component._pixelTopForRow = pixelTopForRow;
+  // Block-aware inverse: given a pixel offset from content top, return the
+  // screen row that contains it. Exposed so the component class can use it
+  // in mouse-click and screenPositionForPixelPosition calculations.
+  component._rowAtPixel = rowAtPixel;
 
   // Top spacer reserves space for everything above the first rendered
   // row: `first * lh` PLUS the height of every block whose row is
@@ -944,6 +1019,37 @@ function Editor(props) {
     return true;
   });
 
+  // Per-screen-row extra classes from `type: 'line-number'` decorations
+  // (e.g. the 'folded' class that text-editor.js adds via decorateMarkerLayer
+  // on the foldsMarkerLayer). Keyed by screen row; value is the combined
+  // class string for that row.
+  const lineNumberDecoClasses = createMemo(() => {
+    decorationsVersion();
+    displayVersion();
+    const byRow = new Map();
+    if (!isModelAlive() || !model.decorationManager) return byRow;
+    const total = model.getScreenLineCount();
+    let propsByMarker = null;
+    if (model.decorationManager.decorationPropertiesByMarkerForScreenRowRange) {
+      propsByMarker = model.decorationManager.decorationPropertiesByMarkerForScreenRowRange(0, total);
+    }
+    if (!propsByMarker) return byRow;
+    for (const [marker, decos] of propsByMarker) {
+      for (const d of decos) {
+        if (!d || !d.class) continue;
+        const isLineNumber = Array.isArray(d.type)
+          ? d.type.indexOf('line-number') !== -1
+          : d.type === 'line-number';
+        if (!isLineNumber) continue;
+        const range = marker.getScreenRange ? marker.getScreenRange() : null;
+        if (!range) continue;
+        const reversed = marker.isReversed ? marker.isReversed() : false;
+        applyLineDecoration(byRow, d, range, reversed);
+      }
+    }
+    return byRow;
+  });
+
   // Build full cursor descriptors: position + merged class/style from
   // any `type: 'cursor'` decorations attached to the cursor's marker.
   // vim-mode-plus uses cursor decorations with `style: { top, left }`
@@ -1079,6 +1185,12 @@ function Editor(props) {
       setScrollLeft(sl);
       component.scrollTop = st;
       component.scrollLeft = sl;
+      // Sync gutter translateY imperatively — same frame as the scroll
+      // event, before SolidJS re-renders — so the gutter never lags the
+      // content by one frame (which causes a visible shaking effect).
+      if (gutterInnerRef) {
+        gutterInnerRef.style.transform = 'translateY(' + (-st) + 'px)';
+      }
       // Reposition any floating overlay decorations (e.g. autocomplete list)
       // when the scroller scrolls so they track their anchor position.
       for (const decoration of component._overlays.keys()) {
@@ -1176,6 +1288,9 @@ function Editor(props) {
             bottomSpacer={bottomSpacer}
             showLineNumbers={showLineNumbers}
             maxDigits={maxDigits}
+            sortedBlocks={sortedBlocks}
+            lineNumberDecoClasses={lineNumberDecoClasses}
+            gutterRef={(el) => (gutterInnerRef = el)}
           />
         </Show>
 
@@ -1387,6 +1502,7 @@ class PulsarTextEditorComponent {
     this._activeItemSub = null;
     this._decorationsSub = null;
     this._destroySub = null;
+    this._grammarSub = null;
 
     // Overlay decorations: packages like autocomplete-plus use
     // `editor.decorateMarker(marker, {type: 'overlay', item: el})`
@@ -1529,6 +1645,13 @@ class PulsarTextEditorComponent {
       this._destroySub = this.props.model.onDidDestroy(() => this.destroy());
     }
 
+    // Stamp data-grammar on the element so CSS and packages that key off
+    // `atom-text-editor[data-grammar~="source js"]` etc. work correctly.
+    this._updateGrammarDataset();
+    if (this.props.model.onDidChangeGrammar) {
+      this._grammarSub = this.props.model.onDidChangeGrammar(() => this._updateGrammarDataset());
+    }
+
     // For mini editors, mirror the legacy behavior: stamp a `mini`
     // attribute/class on the host element so the existing
     // `atom-text-editor[mini]` CSS rules apply.
@@ -1595,6 +1718,26 @@ class PulsarTextEditorComponent {
 
     if (!this._linesWrapper || !this._lineHeight) return;
 
+    const target = event.target;
+    const model = this.props.model;
+
+    // Gutter fold toggle: clicking the chevron icon on a foldable/folded row.
+    if (
+      target &&
+      target.matches('.icon-right') &&
+      target.parentElement &&
+      (target.parentElement.matches('.foldable') || target.parentElement.matches('.folded'))
+    ) {
+      const lineNumberEl = target.parentElement;
+      const screenRow = parseInt(lineNumberEl.dataset.screenRow, 10);
+      if (!isNaN(screenRow)) {
+        const bufferRow = model.bufferPositionForScreenPosition([screenRow, 0]).row;
+        model.toggleFoldAtBufferRow(bufferRow);
+      }
+      event.preventDefault();
+      return;
+    }
+
     const linesRect = this._linesWrapper.getBoundingClientRect();
     // Only treat clicks inside the lines area as cursor-positioning
     // gestures; clicks in the gutter fall through.
@@ -1608,8 +1751,14 @@ class PulsarTextEditorComponent {
     }
 
     event.preventDefault();
-    const model = this.props.model;
     const screenPosition = this._screenPositionForMouse(event);
+
+    // Clicking a fold-marker in the lines area collapses an active fold.
+    if (target && target.matches('.fold-marker')) {
+      const bufferPosition = model.bufferPositionForScreenPosition(screenPosition);
+      model.destroyFoldsContainingBufferPositions([bufferPosition], false);
+      return;
+    }
 
     if (event.shiftKey) {
       model.selectToScreenPosition(screenPosition, { autoscroll: false });
@@ -1654,7 +1803,7 @@ class PulsarTextEditorComponent {
     // any scroll offset — no need to add scrollTop again.
     const y = event.clientY - linesRect.top;
     const x = event.clientX - linesRect.left;
-    const row = Math.max(0, Math.floor(y / lh));
+    const row = this._rowAtPixel ? this._rowAtPixel(y) : Math.max(0, Math.floor(y / lh));
     const clampedRow = Math.min(row, this.props.model.getScreenLineCount() - 1);
     const col = Math.max(0, Math.round(x / cw));
     return this.props.model.clipScreenPosition([clampedRow, col]);
@@ -1724,6 +1873,10 @@ class PulsarTextEditorComponent {
       this._destroySub.dispose();
       this._destroySub = null;
     }
+    if (this._grammarSub) {
+      this._grammarSub.dispose();
+      this._grammarSub = null;
+    }
     if (this._destroyAllBlockDecorations) {
       this._destroyAllBlockDecorations();
     }
@@ -1765,6 +1918,15 @@ class PulsarTextEditorComponent {
     if (this.focused) {
       this.focused = false;
       this.element.classList.remove('is-focused');
+    }
+  }
+
+  _updateGrammarDataset() {
+    const grammar = this.props.model.getGrammar && this.props.model.getGrammar();
+    if (grammar && grammar.scopeName) {
+      this.element.dataset.grammar = grammar.scopeName.replace(/\./g, ' ');
+    } else {
+      delete this.element.dataset.grammar;
     }
   }
 
@@ -1933,7 +2095,7 @@ class PulsarTextEditorComponent {
     const lh = this._lineHeight;
     const cw = this._charWidth;
     if (!lh) return this.props.model.clipScreenPosition([0, 0]);
-    const row = Math.max(0, Math.floor(top / lh));
+    const row = this._rowAtPixel ? this._rowAtPixel(top) : Math.max(0, Math.floor(top / lh));
     const col = Math.max(0, Math.round(left / (cw || 1)));
     return this.props.model.clipScreenPosition([row, col]);
   }
