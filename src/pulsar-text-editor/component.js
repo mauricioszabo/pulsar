@@ -137,9 +137,66 @@ function buildPlainLineHtml(text, visibleColumnRange) {
   return escapeHtml(text);
 }
 
+// Apply a line / line-number decoration's `class` to every row it
+// intersects, accumulating into `byRow: Map<row, className>`.
+//
+// Honors the same filtering knobs as the legacy editor:
+//   * `onlyEmpty` / `onlyNonEmpty` — skip if the marker's screen range
+//     doesn't match.
+//   * `onlyHead` — apply only to the row containing the marker's head.
+//   * `omitEmptyLastRow` (default true) — when the screen range ends
+//     at column 0 of a row, that row is excluded.
+function applyLineDecoration(byRow, decoration, screenRange, reversed) {
+  if (!decoration.class) return;
+  const empty = screenRange.isEmpty();
+  if (empty) {
+    if (decoration.onlyNonEmpty) return;
+  } else {
+    if (decoration.onlyEmpty) return;
+  }
+  let omitLastRow = false;
+  if (!empty && decoration.omitEmptyLastRow !== false) {
+    omitLastRow = screenRange.end.column === 0;
+  }
+  let startRow = screenRange.start.row;
+  let endRow = screenRange.end.row;
+  if (decoration.onlyHead) {
+    if (reversed) endRow = startRow;
+    else startRow = endRow;
+  }
+  for (let row = startRow; row <= endRow; row++) {
+    if (omitLastRow && row === screenRange.end.row) break;
+    const cur = byRow.get(row);
+    byRow.set(row, cur ? cur + ' ' + decoration.class : decoration.class);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Solid components
 // ---------------------------------------------------------------------------
+
+// Render a single block decoration. Block decorations carry an `item`
+// (a DOM element or model with `.element`); we attach it under a
+// wrapper div via `ref` so Solid removes the wrapper (and the item with
+// it) when the row scrolls out of the rendered viewport.
+//
+// Re-attaching on every mount is intentional: the SAME `item` element
+// might be moved between wrappers as the row enters/leaves the
+// rendered window — `appendChild` of an already-attached node implicitly
+// removes it from its previous parent, so this Just Works.
+function BlockDecoration(props) {
+  return (
+    <div
+      class="block-decoration"
+      ref={(el) => {
+        const item = props.block.element;
+        if (item && el && item.parentNode !== el) {
+          el.appendChild(item);
+        }
+      }}
+    />
+  );
+}
 
 // One screen line. Uses innerHTML so the span nesting from the tag
 // walker is applied as a single DOM mutation rather than a tree of
@@ -170,8 +227,17 @@ function Line(props) {
     }
     return buildLineHtml(item.screenLine, props.displayLayer, null);
   });
-  // `props.cursorLine` is true when this row holds the primary cursor.
-  const cls = () => 'line' + (props.cursorLine ? ' cursor-line' : '');
+  // Class composition:
+  //   'line'                       — base
+  //   ' cursor-line'               — primary cursor's row
+  //   ' <line decoration class>'   — any `type:'line'` decorations
+  //                                  intersecting this row
+  const cls = () => {
+    let c = 'line';
+    if (props.cursorLine) c += ' cursor-line';
+    if (props.extraClass) c += ' ' + props.extraClass;
+    return c;
+  };
   // For virtualized lines, pad-left to position the visible text where
   // it should appear, and set `min-width` to the full line width so the
   // scroll container exposes the full horizontal range.
@@ -202,6 +268,7 @@ function LineNumber(props) {
   const cls = () => {
     let c = 'line-number';
     if (props.foldable) c += ' foldable';
+    if (props.extraClass) c += ' ' + props.extraClass;
     return c;
   };
   // Number string: right-padded with NBSP to maxDigits width; soft-wrapped
@@ -264,14 +331,19 @@ function GutterContainer(props) {
 // Converts a screen-range into a list of absolutely-positioned rect
 // descriptors. Callers map these to `.region` divs inside a `.selection`
 // wrapper so the core CSS `@syntax-selection-color` rule applies.
-function rangeToRects(range, lh, cw) {
+//
+// `topForRow` is the editor's `pixelTopForRow` accessor; it includes
+// the cumulative height of any block decorations conceptually before
+// each row, which keeps highlights aligned with the visible text once
+// blocks are pushing rows down.
+function rangeToRects(range, lh, cw, topForRow) {
   if (!range || range.isEmpty()) return [];
   const { start, end } = range;
   if (start.row === end.row) {
     const w = (end.column - start.column) * cw;
     if (w <= 0) return [];
     return [{
-      top: start.row * lh,
+      top: topForRow(start.row),
       left: start.column * cw,
       width: w,
       right: null,
@@ -280,18 +352,20 @@ function rangeToRects(range, lh, cw) {
   }
   const rects = [];
   // Top partial line (start.col → end of line).
-  rects.push({ top: start.row * lh, left: start.column * cw, right: 0, width: null, height: lh });
-  // Full middle lines (if any).
-  if (end.row - start.row > 1) {
+  rects.push({ top: topForRow(start.row), left: start.column * cw, right: 0, width: null, height: lh });
+  // Full middle lines (if any). Each row gets its own rect because the
+  // tops between them may diverge from a uniform `lh` step once block
+  // decorations are accounted for.
+  for (let r = start.row + 1; r < end.row; r++) {
     rects.push({
-      top: (start.row + 1) * lh,
+      top: topForRow(r),
       left: 0, right: 0, width: null,
-      height: (end.row - start.row - 1) * lh
+      height: lh
     });
   }
   // Bottom partial line (0 → end.col).
   if (end.column > 0) {
-    rects.push({ top: end.row * lh, left: 0, width: end.column * cw, right: null, height: lh });
+    rects.push({ top: topForRow(end.row), left: 0, width: end.column * cw, right: null, height: lh });
   }
   return rects;
 }
@@ -302,7 +376,7 @@ function SelectionHighlight(props) {
     const lh = props.lineHeight();
     const cw = props.charWidth();
     if (!lh || !cw) return [];
-    return rangeToRects(props.range, lh, cw);
+    return rangeToRects(props.range, lh, cw, props.topForRow);
   });
   return (
     <div class="highlight selection">
@@ -349,7 +423,11 @@ function CursorBar(props) {
     const pos = props.position;
     if (!pos) return { display: 'none' };
     let baseX = pos.column * cw;
-    let baseY = pos.row * lh;
+    // Use the editor's `pixelTopForRow` if provided so the cursor stays
+    // aligned with the line text when block decorations push subsequent
+    // rows down. Falls back to `pos.row * lh` when no helper is given
+    // (which happens during the brief window before measurement).
+    let baseY = props.topForRow ? props.topForRow(pos.row) : pos.row * lh;
     const extra = props.extraStyle;
     // vim-mode-plus passes `top`/`left` as delta strings (e.g. '-43px', '0ch').
     // These must be incorporated into the transform, not applied as absolute
@@ -421,9 +499,85 @@ function Editor(props) {
 
   // Bumped when any decoration is added/removed/updated on the model.
   // Drives cursor decoration merge (vim-mode-plus block-cursor style),
-  // and will drive line-class / highlight decorations as those land.
+  // line-class, line-number, highlight, and custom-gutter decoration
+  // queries.
   const [decorationsVersion, bumpDecorations] = createSignal(0);
   component._notifyDecorationsChange = () => bumpDecorations((v) => v + 1);
+
+  // Block decorations — tracked separately so changes to a block's
+  // height (which DON'T touch the decoration list) trigger relayout.
+  // Each entry: { decoration, element, row, position, order, height,
+  //               ro, markerSub, destroySub }
+  const blockDecorations = new Map();
+  const [blocksVersion, bumpBlocks] = createSignal(0);
+  // Public hook for the constructor to add a block decoration as
+  // soon as the model emits it. The actual decoration discovery lives
+  // in `_observeBlockDecorations` on the component class.
+  component._addBlockDecoration = (decoration) => {
+    if (blockDecorations.has(decoration)) return;
+    const props = decoration.getProperties
+      ? decoration.getProperties()
+      : decoration.properties;
+    if (!props || !props.item) return;
+    const element = props.item.element || props.item;
+    if (!element || typeof element !== 'object' || element.nodeType !== 1) return;
+    const marker = decoration.getMarker
+      ? decoration.getMarker()
+      : decoration.marker;
+    if (!marker || marker.isDestroyed()) return;
+    const headPos = marker.getHeadScreenPosition();
+    const row = headPos ? headPos.row : 0;
+    const position = props.position === 'after' ? 'after' : 'before';
+    const order = typeof props.order === 'number' ? props.order : 0;
+    const ro = new ResizeObserver(() => {
+      const info = blockDecorations.get(decoration);
+      if (!info) return;
+      const newHeight = element.offsetHeight || 0;
+      if (info.height !== newHeight) {
+        info.height = newHeight;
+        bumpBlocks((v) => v + 1);
+      }
+    });
+    ro.observe(element);
+    let markerSub = null;
+    if (marker.onDidChange) {
+      markerSub = marker.onDidChange(() => {
+        const info = blockDecorations.get(decoration);
+        if (!info) return;
+        const newRow = marker.getHeadScreenPosition().row;
+        if (info.row !== newRow) {
+          info.row = newRow;
+          bumpBlocks((v) => v + 1);
+        }
+      });
+    }
+    let destroySub = null;
+    if (decoration.onDidDestroy) {
+      destroySub = decoration.onDidDestroy(() => {
+        component._removeBlockDecoration(decoration);
+      });
+    }
+    blockDecorations.set(decoration, {
+      decoration, element, row, position, order,
+      height: element.offsetHeight || 0,
+      ro, markerSub, destroySub
+    });
+    bumpBlocks((v) => v + 1);
+  };
+  component._removeBlockDecoration = (decoration) => {
+    const info = blockDecorations.get(decoration);
+    if (!info) return;
+    info.ro.disconnect();
+    if (info.markerSub) info.markerSub.dispose();
+    if (info.destroySub) info.destroySub.dispose();
+    blockDecorations.delete(decoration);
+    bumpBlocks((v) => v + 1);
+  };
+  component._destroyAllBlockDecorations = () => {
+    for (const decoration of [...blockDecorations.keys()]) {
+      component._removeBlockDecoration(decoration);
+    }
+  };
 
   // scrollTop and scrollLeft are kept in sync with the scroller DOM
   // element via a scroll event listener installed in onMount.
@@ -517,15 +671,106 @@ function Editor(props) {
     return [startCol, endCol];
   });
 
-  const topSpacer = createMemo(() => firstRenderedRow() * (lineHeight() || 0));
+  // Block decorations — sorted list of all known blocks across the
+  // buffer. We need ALL of them (not just visible) so the top/bottom
+  // spacers can reserve room for off-screen blocks and the scroll
+  // height matches what the content will be once those rows scroll
+  // into view.
+  //
+  // Sort order: by row asc; within a row, 'before' precedes 'after';
+  // tie-break by `order` (legacy editor convention) then by insertion.
+  const sortedBlocks = createMemo(() => {
+    blocksVersion();
+    const list = [];
+    blockDecorations.forEach((info) => list.push(info));
+    list.sort((a, b) => {
+      if (a.row !== b.row) return a.row - b.row;
+      if (a.position !== b.position) return a.position === 'before' ? -1 : 1;
+      return (a.order || 0) - (b.order || 0);
+    });
+    return list;
+  });
 
+  // Sum of all block-decoration heights anywhere in the buffer.
+  const totalBlocksHeight = createMemo(() => {
+    blocksVersion();
+    let total = 0;
+    blockDecorations.forEach((info) => { total += info.height; });
+    return total;
+  });
+
+  // Returns the visual top (relative to lines-wrapper) of screen row
+  // `row`, including the cumulative height of all block decorations
+  // that conceptually precede it. A block "precedes" row R when:
+  //   * its row < R, OR
+  //   * its row === R and its position === 'before'
+  // Used by the cursor/selection layer so they stay aligned with the
+  // line text once block decorations push subsequent rows down.
+  const pixelTopForRow = (row) => {
+    const lh = lineHeight() || 0;
+    let extra = 0;
+    const blocks = sortedBlocks();
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row > row) break;
+      if (b.row === row && b.position !== 'before') break;
+      extra += b.height;
+    }
+    return row * lh + extra;
+  };
+  // Expose for imperative callers (`pixelPositionForScreenPosition`).
+  component._pixelTopForRow = pixelTopForRow;
+
+  // Top spacer reserves space for everything above the first rendered
+  // row: `first * lh` PLUS the height of every block whose row is
+  // strictly less than first. Blocks AT row first whose position is
+  // 'before' are rendered between the spacer and line first, so they
+  // are NOT in the spacer.
+  const topSpacer = createMemo(() => {
+    const first = firstRenderedRow();
+    const lh = lineHeight();
+    if (!lh) return 0;
+    let extra = 0;
+    const blocks = sortedBlocks();
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row >= first) break;
+      extra += b.height;
+    }
+    return first * lh + extra;
+  });
+
+  // Bottom spacer reserves space for: lines after `last`, plus blocks
+  // strictly below the rendered range. All blocks at rows in
+  // [first, last] are rendered inline with the lines, so the spacer
+  // only needs to account for `b.row > last`.
   const bottomSpacer = createMemo(() => {
     const lh = lineHeight();
     if (!lh) return 0;
     const last = lastRenderedRow();
     const total = totalScreenRows();
-    return Math.max(0, (total - 1 - last) * lh);
+    let extra = 0;
+    const blocks = sortedBlocks();
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row > last) extra += b.height;
+    }
+    return Math.max(0, (total - 1 - last) * lh + extra);
   });
+
+  // Reactive lookup: blocks at a specific (row, position).  Returns a
+  // (possibly empty) array. Memoized internally per render so renders
+  // touching the same row repeatedly don't re-scan the sorted list.
+  const blocksAt = (row, position) => {
+    const out = [];
+    const blocks = sortedBlocks();
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row > row) break;
+      if (b.row === row && b.position === position) out.push(b);
+    }
+    return out;
+  };
 
   // Visible screen lines as wrappers, with stable identity across
   // renders. `<For>` (used below) keys items by referential identity, so
@@ -973,13 +1218,25 @@ function Editor(props) {
                 `<For>` swaps just the affected `<Line>`. */}
             <For each={visibleScreenLines()}>
               {(item) => (
-                <Line
-                  item={item}
-                  displayLayer={displayLayer}
-                  visibleColumnRange={visibleColumnRange}
-                  charWidth={charWidth}
-                  cursorLine={cursorRows().has(item.row)}
-                />
+                <>
+                  {/* Block decorations with position 'before' render
+                      ABOVE the line at the same row. */}
+                  <For each={blocksAt(item.row, 'before')}>
+                    {(b) => <BlockDecoration block={b} />}
+                  </For>
+                  <Line
+                    item={item}
+                    displayLayer={displayLayer}
+                    visibleColumnRange={visibleColumnRange}
+                    charWidth={charWidth}
+                    cursorLine={cursorRows().has(item.row)}
+                  />
+                  {/* Block decorations with position 'after' render
+                      BELOW the line at the same row. */}
+                  <For each={blocksAt(item.row, 'after')}>
+                    {(b) => <BlockDecoration block={b} />}
+                  </For>
+                </>
               )}
             </For>
 
@@ -1017,7 +1274,7 @@ function Editor(props) {
               class="highlights"
               style={
                 'position: absolute; top: 0; left: 0; right: 0; ' +
-                'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
+                'height: ' + (totalScreenRows() * (lineHeight() || 0) + totalBlocksHeight()) + 'px; ' +
                 'pointer-events: none; z-index: -1;'
               }
             >
@@ -1027,6 +1284,7 @@ function Editor(props) {
                     range={range}
                     lineHeight={lineHeight}
                     charWidth={charWidth}
+                    topForRow={pixelTopForRow}
                   />
                 )}
               </For>
@@ -1035,7 +1293,7 @@ function Editor(props) {
               class={'cursors' + (blinkOff() ? ' blink-off' : '')}
               style={
                 'position: absolute; top: 0; left: 0; right: 0; ' +
-                'height: ' + (totalScreenRows() * (lineHeight() || 0)) + 'px; ' +
+                'height: ' + (totalScreenRows() * (lineHeight() || 0) + totalBlocksHeight()) + 'px; ' +
                 'pointer-events: none;'
               }
             >
@@ -1047,6 +1305,7 @@ function Editor(props) {
                     extraStyle={c.extraStyle}
                     lineHeight={lineHeight}
                     charWidth={charWidth}
+                    topForRow={pixelTopForRow}
                   />
                 )}
               </For>
@@ -1249,8 +1508,14 @@ class PulsarTextEditorComponent {
       this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
         if (this._notifyDecorationsChange) this._notifyDecorationsChange();
         this._syncOverlayDecorations();
+        this._syncBlockDecorations();
       });
     }
+    // Initial sync — picks up any decorations that already exist on the
+    // model when this component is constructed (the constructor of the
+    // edit session may have decorated marker layers before we got here).
+    this._syncBlockDecorations();
+    this._syncOverlayDecorations();
 
     // When the model is destroyed (tab closed, pane closed, project
     // close), tear the Solid render down. Without this, the resize and
@@ -1459,6 +1724,9 @@ class PulsarTextEditorComponent {
       this._destroySub.dispose();
       this._destroySub = null;
     }
+    if (this._destroyAllBlockDecorations) {
+      this._destroyAllBlockDecorations();
+    }
     if (this.disposeRender) {
       this.disposeRender();
       this.disposeRender = null;
@@ -1541,8 +1809,16 @@ class PulsarTextEditorComponent {
 
   _autoscrollVertically(screenRange, options) {
     const lh = this._lineHeight;
-    const startPx = screenRange.start.row * lh;
-    const endPx = (screenRange.end.row + 1) * lh;
+    // Account for block decorations above each row so autoscroll lands
+    // on the visible top of the line, not the unblocked `row * lh`
+    // estimate that would leave the line clipped under preceding
+    // block-decoration content.
+    const startPx = this._pixelTopForRow
+      ? this._pixelTopForRow(screenRange.start.row)
+      : screenRange.start.row * lh;
+    const endPx = (this._pixelTopForRow
+      ? this._pixelTopForRow(screenRange.end.row)
+      : screenRange.end.row * lh) + lh;
 
     // SolidJS re-renders asynchronously, so when a new row is added the
     // bottom spacer DOM height may not yet reflect the new row count.
@@ -1621,15 +1897,34 @@ class PulsarTextEditorComponent {
     }
   }
 
-  addBlockDecoration(_decoration) {}
-  invalidateBlockDecorationDimensions() {}
+  // Called by text-editor.js when a `type: 'block'` decoration is
+  // created via `editor.decorateMarker(...)`. Forward to the Solid-side
+  // tracker so it can render the item between the appropriate lines.
+  addBlockDecoration(decoration) {
+    if (this._addBlockDecoration) this._addBlockDecoration(decoration);
+  }
+  // Triggered by callers that change the dimensions of a previously
+  // measured block (e.g. autocomplete-plus rebuilding its suggestion
+  // list). The ResizeObserver wired up in `_addBlockDecoration` already
+  // catches size changes, so this is a no-op — but keep the method
+  // around for ABI compatibility.
+  invalidateBlockDecorationDimensions(_decoration) {}
 
   // --- Position / measurement queries -----------------------------------
 
   pixelPositionForScreenPosition(screenPosition) {
     if (!screenPosition) return { top: 0, left: 0 };
+    const row = screenPosition.row || 0;
+    // Use the Solid editor's `pixelTopForRow` when available so callers
+    // that position UI relative to a row (overlay decorations,
+    // autocomplete-plus suggestion list) get the post-block-decoration
+    // pixel top. Falls back to a simple `row * lineHeight` if the Solid
+    // component hasn't mounted yet.
+    const top = this._pixelTopForRow
+      ? this._pixelTopForRow(row)
+      : row * this._lineHeight;
     return {
-      top: (screenPosition.row || 0) * this._lineHeight,
+      top,
       left: (screenPosition.column || 0) * this._charWidth
     };
   }
@@ -1763,6 +2058,27 @@ class PulsarTextEditorComponent {
   }
 
   queryDecorationsToRender() {}
+
+  // --- Block decorations -------------------------------------------------
+
+  // Discovery loop: scan the model's current decorations for blocks the
+  // Editor solid component hasn't tracked yet, register them. Also drop
+  // any blocks whose decoration is no longer on the model (in case
+  // we missed a destroy event).
+  _syncBlockDecorations() {
+    const model = this.props.model;
+    if (!model || !model.decorationManager) return;
+    if (!this._addBlockDecoration) return; // Solid component not mounted yet.
+    const all = model.decorationManager.getDecorations
+      ? model.decorationManager.getDecorations()
+      : [];
+    const live = new Set();
+    for (const decoration of all) {
+      if (!decoration.isType || !decoration.isType('block')) continue;
+      live.add(decoration);
+      this._addBlockDecoration(decoration);
+    }
+  }
 
   // --- Overlay decorations -----------------------------------------------
 
