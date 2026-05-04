@@ -462,6 +462,7 @@ function Editor(props) {
   let measureRef;
   let scrollerRef;
   let linesWrapperRef;
+  let bottomSpacerRef;
 
   // --- derived data ---
 
@@ -815,6 +816,7 @@ function Editor(props) {
   onMount(() => {
     component._scroller = scrollerRef;
     component._linesWrapper = linesWrapperRef;
+    component._bottomSpacer = bottomSpacerRef;
     component._measure = measure;
 
     if (!measure()) {
@@ -982,7 +984,7 @@ function Editor(props) {
             </For>
 
             {/* Bottom spacer fills the remaining virtual height. */}
-            <div style={`height: ${bottomSpacer()}px; display: block;`} />
+            <div ref={(el) => (bottomSpacerRef = el)} style={`height: ${bottomSpacer()}px; display: block;`} />
 
             {/* Placeholder text (e.g. "Filter commands", "Search…")
                 shown when the buffer is empty. Mini editors use this
@@ -1541,6 +1543,21 @@ class PulsarTextEditorComponent {
     const lh = this._lineHeight;
     const startPx = screenRange.start.row * lh;
     const endPx = (screenRange.end.row + 1) * lh;
+
+    // SolidJS re-renders asynchronously, so when a new row is added the
+    // bottom spacer DOM height may not yet reflect the new row count.
+    // The browser silently clamps scrollTop to scrollHeight - clientHeight,
+    // so we expand the spacer imperatively before adjusting scrollTop to
+    // ensure the full content height is available immediately.
+    if (this._bottomSpacer) {
+      const totalHeight = this.props.model.getScreenLineCount() * lh;
+      if (this._scroller.scrollHeight < totalHeight) {
+        const current = parseInt(this._bottomSpacer.style.height || '0', 10);
+        const deficit = totalHeight - this._scroller.scrollHeight;
+        this._bottomSpacer.style.height = (current + deficit) + 'px';
+      }
+    }
+
     const viewH = this._scroller.clientHeight;
     const marginLines = Math.min(
       this.props.model && this.props.model.verticalScrollMargin != null
@@ -1835,25 +1852,28 @@ class PulsarTextEditorComponent {
     if (!lh || !cw || !this._scroller) return;
 
     // `contain: layout` on atom-text-editor makes it the containing block for
-    // `position: fixed` children — so we must use coordinates relative to the
+    // `position: fixed` children — so coordinates must be relative to the
     // editor element, not the viewport.
-    const editorRect = this.element.getBoundingClientRect();
-    const scrollerRect = this._scroller.getBoundingClientRect();
+    //
+    // We use offsetTop/offsetLeft (static geometry, no reflow) to find the
+    // scroller's position within the editor, avoiding forced layouts on every
+    // scroll event which would fight the browser's pending scrollTop updates.
+    const scrollerOffsetTop = this._scroller.offsetTop;
+    const scrollerOffsetLeft = this._scroller.offsetLeft;
     const pixelTop = screenPosition.row * lh - this._scroller.scrollTop;
     const pixelLeft = screenPosition.column * cw - this._scroller.scrollLeft;
-
-    // scrollerRect is in viewport coords; subtract editorRect to get
-    // editor-relative coords for the fixed positioned overlay.
-    const scrollerOffsetTop = scrollerRect.top - editorRect.top;
-    const scrollerOffsetLeft = scrollerRect.left - editorRect.left;
 
     let top = scrollerOffsetTop + pixelTop + lh;
     let left = scrollerOffsetLeft + pixelLeft;
 
-    // Avoid overflow off bottom of editor (using viewport coords for size checks).
+    // Overflow avoidance: compare absolute viewport positions so we can
+    // check against window bounds. getBoundingClientRect() here is fine
+    // because it only runs when the overlay is first shown or resized,
+    // not on every scroll tick.
     const itemEl = wrapperEl.firstChild;
     if (itemEl) {
       const itemRect = itemEl.getBoundingClientRect();
+      const editorRect = this.element.getBoundingClientRect();
       const windowH = window.innerHeight;
       const windowW = window.innerWidth;
       const absTop = editorRect.top + top;
