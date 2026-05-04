@@ -1834,27 +1834,38 @@ class PulsarTextEditorComponent {
     const cw = this._charWidth;
     if (!lh || !cw || !this._scroller) return;
 
+    // `contain: layout` on atom-text-editor makes it the containing block for
+    // `position: fixed` children — so we must use coordinates relative to the
+    // editor element, not the viewport.
+    const editorRect = this.element.getBoundingClientRect();
     const scrollerRect = this._scroller.getBoundingClientRect();
     const pixelTop = screenPosition.row * lh - this._scroller.scrollTop;
     const pixelLeft = screenPosition.column * cw - this._scroller.scrollLeft;
 
-    let top = scrollerRect.top + pixelTop + lh;
-    let left = scrollerRect.left + pixelLeft;
+    // scrollerRect is in viewport coords; subtract editorRect to get
+    // editor-relative coords for the fixed positioned overlay.
+    const scrollerOffsetTop = scrollerRect.top - editorRect.top;
+    const scrollerOffsetLeft = scrollerRect.left - editorRect.left;
 
-    // Avoid overflow off bottom of window.
+    let top = scrollerOffsetTop + pixelTop + lh;
+    let left = scrollerOffsetLeft + pixelLeft;
+
+    // Avoid overflow off bottom of editor (using viewport coords for size checks).
     const itemEl = wrapperEl.firstChild;
     if (itemEl) {
       const itemRect = itemEl.getBoundingClientRect();
       const windowH = window.innerHeight;
       const windowW = window.innerWidth;
-      if (top + itemRect.height > windowH) {
-        const flippedTop = scrollerRect.top + pixelTop - itemRect.height;
-        if (flippedTop >= 0) top = flippedTop;
+      const absTop = editorRect.top + top;
+      if (absTop + itemRect.height > windowH) {
+        const flippedTop = scrollerOffsetTop + pixelTop - itemRect.height;
+        if (editorRect.top + flippedTop >= 0) top = flippedTop;
       }
-      if (left + itemRect.width > windowW) {
-        left = Math.max(0, windowW - itemRect.width);
+      const absLeft = editorRect.left + left;
+      if (absLeft + itemRect.width > windowW) {
+        left = Math.max(-editorRect.left, windowW - editorRect.left - itemRect.width);
       }
-      if (left < 0) left = 0;
+      if (absLeft < 0) left = -editorRect.left;
     }
 
     wrapperEl.style.top = Math.round(top) + 'px';
