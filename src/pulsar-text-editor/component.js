@@ -348,15 +348,38 @@ function CursorBar(props) {
     if (!lh || !cw) return { display: 'none' };
     const pos = props.position;
     if (!pos) return { display: 'none' };
+    let baseX = pos.column * cw;
+    let baseY = pos.row * lh;
+    const extra = props.extraStyle;
+    // vim-mode-plus passes `top`/`left` as delta strings (e.g. '-43px', '0ch').
+    // These must be incorporated into the transform, not applied as absolute
+    // CSS top/left (which would just shift from 0, not from the cursor position).
+    let extraRest = null;
+    if (extra) {
+      if (extra.top != null) {
+        const v = extra.top;
+        if (typeof v === 'string' && v.endsWith('px')) baseY += parseFloat(v);
+        else if (typeof v === 'number') baseY += v;
+      }
+      if (extra.left != null) {
+        const v = extra.left;
+        if (typeof v === 'string' && v.endsWith('ch')) baseX += parseFloat(v) * cw;
+        else if (typeof v === 'string' && v.endsWith('px')) baseX += parseFloat(v);
+        else if (typeof v === 'number') baseX += v;
+      }
+      // Pass through any other extra style props (e.g. visibility, width, background)
+      const { top: _t, left: _l, ...rest } = extra;
+      if (Object.keys(rest).length > 0) extraRest = rest;
+    }
     const base = {
       position: 'absolute',
       top: 0,
       left: 0,
       width: cw + 'px',
       height: lh + 'px',
-      transform: 'translate(' + (pos.column * cw) + 'px, ' + (pos.row * lh) + 'px)'
+      transform: 'translate(' + baseX + 'px, ' + baseY + 'px)'
     };
-    return props.extraStyle ? Object.assign(base, props.extraStyle) : base;
+    return extraRest ? Object.assign(base, extraRest) : base;
   };
   const cls = () => 'cursor' + (props.extraClass ? ' ' + props.extraClass : '');
   return <div class={cls()} style={style()} />;
@@ -764,6 +787,11 @@ function Editor(props) {
     setCharWidth(cw);
     component._lineHeight = lh;
     component._charWidth = cw;
+    // Keep model measurements in sync so external callers (vim-mode-plus,
+    // etc.) that use editor.getLineHeightInPixels() / getDefaultCharWidth()
+    // get real values rather than the 0/null they were initialised with.
+    if (model.setLineHeightInPixels) model.setLineHeightInPixels(lh);
+    if (model.setDefaultCharWidth) model.setDefaultCharWidth(cw, cw, cw, cw);
     return true;
   };
 
@@ -1560,7 +1588,9 @@ class PulsarTextEditorComponent {
 
   // --- Dimensions -------------------------------------------------------
 
-  getLineHeight() { return this._lineHeight || 0; }
+  getLineHeight() {
+    return this._lineHeight || 0;
+  }
   getBaseCharacterWidth() { return this._charWidth || 0; }
 
   getContentHeight() {
