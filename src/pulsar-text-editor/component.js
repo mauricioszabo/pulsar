@@ -614,8 +614,19 @@ function Editor(props) {
       const nextBufRow = i + 1 < count
         ? model.bufferRowForScreenRow(screenRow + 1)
         : bufRow + 1;
+      // Skip the `isFoldableAtBufferRow` check for very long lines:
+      // the tree-sitter language mode answers it by scanning the parse
+      // tree across the whole row for fold captures
+      // (`getOrCreateBoundariesIterator` → `ts_query_cursor_next_capture`),
+      // which on a 1.3 MB minified line is 10+ s of work. Long minified
+      // lines aren't usefully foldable anyway. The threshold matches
+      // the line-rendering plain-text fast path so the gutter and the
+      // line agree on which rows are "too big to ask the language mode
+      // about".
+      const length = model.lineLengthForScreenRow(screenRow);
       const foldable = !softWrapped &&
         bufRow !== nextBufRow &&
+        length <= PLAIN_TEXT_THRESHOLD &&
         model.isFoldableAtBufferRow(bufRow);
       const cached = gutterCache.get(screenRow);
       if (
