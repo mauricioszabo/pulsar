@@ -1146,7 +1146,11 @@ class PulsarTextEditorComponent {
             this.attached &&
             document.activeElement !== this.hiddenInput
           ) {
-            this.hiddenInput.focus();
+            // Route via the wrapped element.focus() so the focus event
+            // fires on the editor element (autocomplete-plus etc.
+            // depend on this); the wrapper then forwards to the hidden
+            // input.
+            this.element.focus({ preventScroll: true });
           }
         }
       );
@@ -1243,9 +1247,18 @@ class PulsarTextEditorComponent {
   _onMouseDown(event) {
     if (event.button !== 0) return;
 
-    // Always focus the hidden input on any click inside the editor.
+    // Always focus the editor on any click inside it. Route through
+    // `this.element.focus()` (NOT `hiddenInput.focus()` directly) so the
+    // wrapper installed in the constructor runs `originalElementFocus`
+    // first — that fires the `focus` event on the editor element, which
+    // is what autocomplete-plus and other packages listen to via
+    // `view.addEventListener('focus', …)` to know an editor became
+    // active and start tracking its buffer changes. Focusing the hidden
+    // input directly silently broke autocomplete activation because
+    // `focus` events don't bubble — only the input would have fired,
+    // and the editor element's listeners would never see anything.
     if (document.activeElement !== this.hiddenInput) {
-      this.hiddenInput.focus({ preventScroll: true });
+      this.element.focus({ preventScroll: true });
     }
 
     if (!this._linesWrapper || !this._lineHeight) return;
