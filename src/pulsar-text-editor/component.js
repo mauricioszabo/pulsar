@@ -52,6 +52,24 @@ let TextEditorElement = null;
 
 // How many extra rows to render beyond the visible viewport on each side.
 const OVERSCAN = 10;
+// How many extra columns to render beyond the visible horizontal viewport
+// on each side. Mirrors the legacy editor's
+// LONG_LINE_VIRTUALIZATION_OVERSCAN.
+const COLUMN_OVERSCAN = 64;
+// Lines longer than this trigger column-range virtualization: only the
+// portion of the line currently visible horizontally is materialized in
+// the DOM. Mirrors the legacy editor's
+// LONG_LINE_VIRTUALIZATION_THRESHOLD and the existing tree-sitter
+// highlighting limit.
+const LONG_LINE_THRESHOLD = 10000;
+// Lines longer than this skip the language mode entirely and render as
+// plain text. Without this, opening a 1.3 MB minified-JS line takes
+// ~18 s — the time is spent inside `ts_query_cursor_next_capture` /
+// scope-resolver building scope info for the whole line, not in our
+// own DOM emission. Plain text loses syntax highlighting on those
+// lines but keeps the editor responsive; column-range virtualization
+// (above) still applies so the DOM stays small too.
+const PLAIN_TEXT_THRESHOLD = 100000;
 const CURSOR_BLINK_PERIOD = 800;
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const DEFAULT_VERTICAL_SCROLL_MARGIN = 2;
@@ -72,7 +90,14 @@ function escapeHtml(s) {
 
 // Build the inner HTML for a `.line` div by walking the tag stream.
 // Returns a plain HTML string suitable for `innerHTML`.
-function buildLineHtml(screenLine, displayLayer) {
+//
+// `visibleColumnRange` (when non-null) is forwarded to the walker, which
+// emits scope opens/closes as before but only emits text-run spans for
+// columns that intersect the viewport. For very long lines (e.g. minified
+// JS) this reduces DOM nodes from O(line length) to O(viewport width),
+// which keeps layout/paint fast even when the editor's content is wider
+// than the viewport.
+function buildLineHtml(screenLine, displayLayer, visibleColumnRange) {
   if (!screenLine) return NBSP;
   if (!screenLine.tags || screenLine.tags.length === 0) {
     const text = screenLine.lineText || '';
@@ -84,6 +109,7 @@ function buildLineHtml(screenLine, displayLayer) {
     tags: screenLine.tags,
     lineText: screenLine.lineText || '',
     displayLayer,
+    visibleColumnRange,
     onOpenScope: (cls) => { html += '<span class="' + escapeHtml(cls) + '">'; },
     onCloseScope: () => { html += '</span>'; },
     onTextRun: (text) => {
@@ -95,6 +121,22 @@ function buildLineHtml(screenLine, displayLayer) {
   return html;
 }
 
+// Build inner HTML for the plain-text fast path used by very long lines.
+// No syntax highlighting, no language-mode involvement — this exists to
+// make opening a buffer with one giant line responsive even when the
+// language mode would take seconds to produce scope info for the line.
+// `visibleColumnRange` clips the rendered text to a window around the
+// viewport for the same DOM-size reasons as `buildLineHtml`.
+function buildPlainLineHtml(text, visibleColumnRange) {
+  if (!text || text.length === 0) return NBSP;
+  if (visibleColumnRange) {
+    const [from, to] = visibleColumnRange;
+    const clipped = text.substring(Math.max(0, from), Math.min(text.length, to));
+    return clipped.length > 0 ? escapeHtml(clipped) : NBSP;
+  }
+  return escapeHtml(text);
+}
+
 // ---------------------------------------------------------------------------
 // Solid components
 // ---------------------------------------------------------------------------
@@ -102,16 +144,53 @@ function buildLineHtml(screenLine, displayLayer) {
 // One screen line. Uses innerHTML so the span nesting from the tag
 // walker is applied as a single DOM mutation rather than a tree of
 // Solid components.
+//
+// Three rendering modes, picked from `item.mode`:
+//   * 'short'   — full line, no virtualization. Default for normal-
+//                 length lines; identical to the original behavior.
+//   * 'long'    — line is wider than the viewport but short enough that
+//                 the language mode produced tags for it. We pass the
+//                 visible column range to the walker so only spans
+//                 inside the viewport reach the DOM, then offset the
+//                 line with a left padding equal to the skipped columns
+//                 and set `min-width` to the line's full pixel width
+//                 so horizontal scrolling still works.
+//   * 'plain'   — line was so long the language mode would block the
+//                 main thread for seconds. Skip syntax highlighting
+//                 entirely; show clipped buffer text. Same padding /
+//                 min-width treatment as 'long' so layout is correct.
 function Line(props) {
-  const html = createMemo(() =>
-    buildLineHtml(props.screenLine, props.displayLayer)
-  );
+  const html = createMemo(() => {
+    const item = props.item;
+    if (item.mode === 'plain') {
+      return buildPlainLineHtml(item.lineText, props.visibleColumnRange());
+    }
+    if (item.mode === 'long') {
+      return buildLineHtml(item.screenLine, props.displayLayer, props.visibleColumnRange());
+    }
+    return buildLineHtml(item.screenLine, props.displayLayer, null);
+  });
   // `props.cursorLine` is true when this row holds the primary cursor.
   const cls = () => 'line' + (props.cursorLine ? ' cursor-line' : '');
+  // For virtualized lines, pad-left to position the visible text where
+  // it should appear, and set `min-width` to the full line width so the
+  // scroll container exposes the full horizontal range.
+  const style = () => {
+    const item = props.item;
+    if (item.mode === 'short') return '';
+    const cw = props.charWidth();
+    if (!cw) return '';
+    const range = props.visibleColumnRange();
+    const fullLen = item.lineLength;
+    const leftPad = range ? Math.max(0, range[0]) * cw : 0;
+    return 'padding-left: ' + leftPad + 'px; ' +
+           'min-width: ' + (fullLen * cw) + 'px;';
+  };
   return (
     <div
       class={cls()}
-      data-screen-row={props.row}
+      data-screen-row={props.item.row}
+      style={style()}
       // eslint-disable-next-line solid/no-innerhtml
       innerHTML={html()}
     />
@@ -288,6 +367,22 @@ function Editor(props) {
   const model = props.model;
   const component = props.component;
   const displayLayer = model.displayLayer;
+  const buffer = model.getBuffer ? model.getBuffer() : model.buffer;
+  // Soft-wrap or fold-aware files use buffer-row→screen-row translation
+  // that diverges from identity, so the plain-text fast path can't safely
+  // substitute `buffer.lineForRow(bufferRow)` for `screenLine.lineText`.
+  // Cache an "is simple" flag once per render (refreshed on display
+  // changes via the memo).
+  const supportsPlainTextFastPath = () => {
+    if (!buffer) return false;
+    if (model.isSoftWrapped && model.isSoftWrapped()) return false;
+    // If folds are present the screen-line text contains the fold marker
+    // glyph, which differs from buffer text.
+    if (displayLayer.foldsMarkerLayer && displayLayer.foldsMarkerLayer.findMarkers().length > 0) {
+      return false;
+    }
+    return true;
+  };
 
   // --- reactive signals ---
 
@@ -312,6 +407,9 @@ function Editor(props) {
 
   // Viewport height in px, updated on resize.
   const [viewportHeight, setViewportHeight] = createSignal(0);
+  // Viewport width in px, updated on resize. Drives column-range
+  // virtualization for long lines.
+  const [viewportWidth, setViewportWidth] = createSignal(0);
 
   // Font metrics, filled by the measurement pass in onMount.
   const [lineHeight, setLineHeight] = createSignal(0);
@@ -371,6 +469,26 @@ function Editor(props) {
     return Math.min(total - 1, Math.ceil((scrollTop() + viewH) / lh) + OVERSCAN);
   });
 
+  // [startCol, endCol] for column-range virtualization on long lines.
+  // Falls back to rough defaults before measurement completes so that
+  // the FIRST render of a buffer with a giant line doesn't materialize
+  // the entire line as a single text node — opening big.js (1.3 MB
+  // single-line minified JS) without a fallback would land ~1.3 MB of
+  // text in the DOM before our `onMount`-driven measurement re-runs the
+  // memo and clips it. With fallbacks the first render already clips to
+  // a viewport-sized window; the next render (once real measurements
+  // arrive) corrects the values.
+  const visibleColumnRange = createMemo(() => {
+    let cw = charWidth();
+    if (!cw) cw = 8;
+    let vw = viewportWidth() || (scrollerRef ? scrollerRef.clientWidth : 0);
+    if (!vw) vw = (typeof window !== 'undefined' ? window.innerWidth : 1024);
+    const sl = scrollLeft();
+    const startCol = Math.max(0, Math.floor(sl / cw) - COLUMN_OVERSCAN);
+    const endCol = Math.ceil((sl + vw) / cw) + COLUMN_OVERSCAN;
+    return [startCol, endCol];
+  });
+
   const topSpacer = createMemo(() => firstRenderedRow() * (lineHeight() || 0));
 
   const bottomSpacer = createMemo(() => {
@@ -381,16 +499,33 @@ function Editor(props) {
     return Math.max(0, (total - 1 - last) * lh);
   });
 
-  // Visible screen lines as { row, screenLine } wrappers, with stable
-  // identity across renders. `<For>` (used below) keys items by
-  // referential identity, so if we minted a fresh wrapper per row on
-  // every cycle each `<Line>` would unmount and remount on every
-  // tokenization event during initial open — that's what made opening
-  // a long file slow. `lineCache` reuses the wrapper for a given row
-  // as long as the underlying `screenLine` reference is the same; only
-  // when the display layer invalidates a row's cached screen line
-  // (a chunk re-tokenized) does that row get a fresh wrapper, which
-  // makes `<For>` swap the single Line that actually changed.
+  // Visible screen lines as wrappers, with stable identity across
+  // renders. `<For>` (used below) keys items by referential identity, so
+  // if we minted a fresh wrapper per row on every cycle each `<Line>`
+  // would unmount and remount on every tokenization event during initial
+  // open — that's what made opening a long file slow.
+  //
+  // Wrapper shape:
+  //   { row, lineLength, mode: 'short', screenLine }
+  //   { row, lineLength, mode: 'long',  screenLine }
+  //   { row, lineLength, mode: 'plain', lineText }
+  //
+  // 'short'  – default; `<Line>` renders the full content with no
+  //            virtualization.
+  // 'long'   – line is wide enough that we want column-range
+  //            virtualization in the walker, but short enough that
+  //            asking the language mode for tags is acceptable.
+  // 'plain'  – line is so long that calling
+  //            `model.screenLineForScreenRow(row)` would block the main
+  //            thread inside tree-sitter (`ts_query_cursor_next_capture`
+  //            and friends — see profile-derived constant comments at
+  //            the top of this file). We bypass the language mode and
+  //            render plain buffer text instead, losing syntax
+  //            highlighting on those lines but keeping the editor open
+  //            responsive. The plain-text path is only available when
+  //            screen rows correspond 1:1 with buffer rows (no soft
+  //            wrap, no folds); otherwise we fall back to 'long' or
+  //            'short' as appropriate.
   //
   // Rows that have scrolled far out of view are pruned when the cache
   // grows past `LINE_CACHE_SLACK` rows beyond the visible window, so
@@ -402,17 +537,46 @@ function Editor(props) {
     if (!isModelAlive()) return prev || [];
     const first = firstRenderedRow();
     const last = lastRenderedRow();
+    const canUsePlain = supportsPlainTextFastPath();
     const arr = [];
     for (let r = first; r <= last; r++) {
-      const screenLine = model.screenLineForScreenRow(r);
-      const cached = lineCache.get(r);
-      if (cached && cached.screenLine === screenLine) {
-        arr.push(cached);
+      // Cheap: screenLineLengths array lookup (with possible spatial
+      // index population, which doesn't invoke the language mode).
+      const length = model.lineLengthForScreenRow(r);
+
+      // Decide rendering mode WITHOUT calling screenLineForScreenRow
+      // for the plain-text path.
+      let wrapper;
+      if (canUsePlain && length > PLAIN_TEXT_THRESHOLD) {
+        const bufferRow = model.bufferRowForScreenRow(r);
+        const text = buffer.lineForRow(bufferRow);
+        const cached = lineCache.get(r);
+        if (
+          cached &&
+          cached.mode === 'plain' &&
+          cached.lineText === text &&
+          cached.lineLength === length
+        ) {
+          arr.push(cached);
+          continue;
+        }
+        wrapper = { row: r, mode: 'plain', lineText: text, lineLength: length };
       } else {
-        const wrapper = { row: r, screenLine };
-        lineCache.set(r, wrapper);
-        arr.push(wrapper);
+        const screenLine = model.screenLineForScreenRow(r);
+        const mode = length > LONG_LINE_THRESHOLD ? 'long' : 'short';
+        const cached = lineCache.get(r);
+        if (
+          cached &&
+          cached.mode === mode &&
+          cached.screenLine === screenLine
+        ) {
+          arr.push(cached);
+          continue;
+        }
+        wrapper = { row: r, mode, screenLine, lineLength: length };
       }
+      lineCache.set(r, wrapper);
+      arr.push(wrapper);
     }
     if (lineCache.size > (last - first + 1) + LINE_CACHE_SLACK) {
       const keepFrom = first - LINE_CACHE_SLACK / 2;
@@ -618,8 +782,12 @@ function Editor(props) {
     // away from the actual rendered text after a zoom.
     const ro = new ResizeObserver(() => {
       setViewportHeight(scrollerRef.clientHeight);
+      setViewportWidth(scrollerRef.clientWidth);
     });
     ro.observe(scrollerRef);
+    // Initial values without waiting for the first observer notification.
+    setViewportHeight(scrollerRef.clientHeight);
+    setViewportWidth(scrollerRef.clientWidth);
 
     const measureRO = new ResizeObserver(() => { measure(); });
     if (measureRef) {
@@ -739,9 +907,10 @@ function Editor(props) {
             <For each={visibleScreenLines()}>
               {(item) => (
                 <Line
-                  screenLine={item.screenLine}
+                  item={item}
                   displayLayer={displayLayer}
-                  row={item.row}
+                  visibleColumnRange={visibleColumnRange}
+                  charWidth={charWidth}
                   cursorLine={cursorRows().has(item.row)}
                 />
               )}
