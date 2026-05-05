@@ -238,16 +238,20 @@ function Line(props) {
     if (props.extraClass) c += ' ' + props.extraClass;
     return c;
   };
-  // For virtualized lines, pad-left to position the visible text where
-  // it should appear, and set `min-width` to the full line width so the
-  // scroll container exposes the full horizontal range.
+  // Set min-width on every line so `contain: paint` (from the core CSS
+  // `.line { contain: layout paint style }`) doesn't clip text that
+  // extends past the line element's natural layout width. For 'short'
+  // mode (no column virtualization) we just need min-width; for 'long'
+  // and 'plain' we also add padding-left to shift the visible window.
   const style = () => {
     const item = props.item;
-    if (item.mode === 'short') return '';
     const cw = props.charWidth();
     if (!cw) return '';
-    const range = props.visibleColumnRange();
     const fullLen = item.lineLength;
+    if (item.mode === 'short') {
+      return 'min-width: ' + (fullLen * cw) + 'px;';
+    }
+    const range = props.visibleColumnRange();
     const leftPad = range ? Math.max(0, range[0]) * cw : 0;
     return 'padding-left: ' + leftPad + 'px; ' +
            'min-width: ' + (fullLen * cw) + 'px;';
@@ -1019,6 +1023,25 @@ function Editor(props) {
     return true;
   });
 
+  // Width of the longest screen line in pixels, used to size the
+  // lines-wrapper so the scroll container has a real horizontal range.
+  // Without this, `.line { contain: layout }` from the core CSS prevents
+  // line content from expanding the wrapper — the scroller never grows
+  // wider than the viewport and horizontal scrolling is impossible.
+  const longestLineWidth = createMemo(() => {
+    displayVersion();
+    if (!isModelAlive()) return 0;
+    const cw = charWidth();
+    if (!cw) return 0;
+    const longestRow = model.getApproximateLongestScreenRow
+      ? model.getApproximateLongestScreenRow()
+      : 0;
+    const length = model.lineLengthForScreenRow
+      ? model.lineLengthForScreenRow(longestRow)
+      : 0;
+    return (length + 1) * cw;
+  });
+
   // Per-screen-row extra classes from `type: 'line-number'` decorations
   // (e.g. the 'folded' class that text-editor.js adds via decorateMarkerLayer
   // on the foldsMarkerLayer). Keyed by screen row; value is the combined
@@ -1290,7 +1313,7 @@ function Editor(props) {
             maxDigits={maxDigits}
             sortedBlocks={sortedBlocks}
             lineNumberDecoClasses={lineNumberDecoClasses}
-            gutterRef={(el) => (gutterInnerRef = el)}
+            gutterRef={(el) => { gutterInnerRef = el; component._gutterInnerRef = el; }}
           />
         </Show>
 
@@ -1314,7 +1337,10 @@ function Editor(props) {
           <div
             ref={(el) => (linesWrapperRef = el)}
             class="lines-wrapper"
-            style="position: relative; z-index: 0; white-space: pre; min-width: 100%;"
+            style={
+              'position: relative; z-index: 0; white-space: pre; ' +
+              'min-width: max(100%, ' + longestLineWidth() + 'px);'
+            }
           >
             {/* Top spacer pushes the first rendered row to its correct
                 vertical position. */}
@@ -1834,6 +1860,33 @@ class PulsarTextEditorComponent {
       PulsarTextEditorComponent.attachedComponents = new Set();
     }
     PulsarTextEditorComponent.attachedComponents.add(this);
+
+    // When the element is moved in the DOM (e.g. pane split, tab drag),
+    // the browser resets the scroller's scrollTop/scrollLeft to 0 but
+    // does NOT fire a scroll event. The model still holds the logical
+    // scroll position; restore it so the virtual row range stays correct.
+    if (this._scroller) {
+      const modelTop = this.scrollTop || 0;
+      const modelLeft = this.scrollLeft || 0;
+      this._scroller.scrollTop = modelTop;
+      this._scroller.scrollLeft = modelLeft;
+      // Sync signals to the DOM values (browser may clamp if content is
+      // shorter than modelTop at this point).
+      if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
+      if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
+      // Retry on the next frame: after SolidJS re-renders the virtual rows
+      // the content is tall enough to accept the full modelTop value.
+      requestAnimationFrame(() => {
+        if (!this._scroller) return;
+        this._scroller.scrollTop = modelTop;
+        this._scroller.scrollLeft = modelLeft;
+        if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
+        if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
+        if (this._gutterInnerRef) {
+          this._gutterInnerRef.style.transform = 'translateY(' + (-this._scroller.scrollTop) + 'px)';
+        }
+      });
+    }
   }
 
   didDetach() {
@@ -2338,7 +2391,9 @@ class PulsarTextEditorComponent {
     // scroll event which would fight the browser's pending scrollTop updates.
     const scrollerOffsetTop = this._scroller.offsetTop;
     const scrollerOffsetLeft = this._scroller.offsetLeft;
-    const pixelTop = screenPosition.row * lh - this._scroller.scrollTop;
+    const pixelTop = (this._pixelTopForRow
+      ? this._pixelTopForRow(screenPosition.row)
+      : screenPosition.row * lh) - this._scroller.scrollTop;
     const pixelLeft = screenPosition.column * cw - this._scroller.scrollLeft;
 
     let top = scrollerOffsetTop + pixelTop + lh;
