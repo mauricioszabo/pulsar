@@ -46,6 +46,8 @@ const {
 } = require('solid-js');
 
 const { walkScreenLineTags } = require('../screen-line-tag-walker');
+const { GutterContainer, CustomGutter } = require('./gutter');
+const { createMeasurement } = require('./measurements');
 
 let TextEditor = null;
 let TextEditorElement = null;
@@ -267,192 +269,6 @@ function Line(props) {
   );
 }
 
-// One line-number cell in the gutter.
-function LineNumber(props) {
-  const cls = () => {
-    let c = 'line-number';
-    if (props.foldable) c += ' foldable';
-    // line-number decorations (e.g. 'folded' from the folds marker layer)
-    const decoClass = props.lineNumberDecoClasses
-      ? props.lineNumberDecoClasses().get(props.row)
-      : null;
-    if (decoClass) c += ' ' + decoClass;
-    return c;
-  };
-  // Number string: right-padded with NBSP to maxDigits width; soft-wrapped
-  // rows show a bullet instead.
-  const label = () => {
-    if (!props.showLineNumbers) return '';
-    const raw = props.softWrapped ? '•' : String(props.bufferRow + 1);
-    return NBSP.repeat(Math.max(0, props.maxDigits - raw.length)) + raw;
-  };
-  return (
-    <div class={cls()} data-screen-row={props.row}>
-      <span class="line-number-text">{label()}</span>
-      <div class="icon-right" />
-    </div>
-  );
-}
-
-// The left gutter containing line numbers. Lives OUTSIDE the scroll-view
-// so it doesn't scroll horizontally. Vertical sync is achieved by applying
-// translateY(-scrollTop) to the inner content, exactly as the legacy editor
-// does.  The container clips content with `overflow: hidden`.
-//
-// Block decorations push lines down in the content area, so the gutter must
-// insert matching spacer divs between line numbers so they stay aligned.
-// We also expose the inner `.gutter` element via `props.gutterRef` so the
-// scroll handler can update its transform imperatively (same frame as the
-// scroll event, no SolidJS re-render lag) to prevent the one-frame shaking
-// that results from the signal-driven translateY path.
-//
-// The flat item list merges visibleRows and sortedBlocks into a single
-// memo so any change to either (new block added, block resized, row
-// scrolled into view) triggers exactly one re-render of the <For>.
-// The line-number gutter — emits a single `.gutter.line-numbers`
-// element. Wrapped by the editor in a shared `.gutter-container` div
-// so this gutter and any custom gutters scroll together via one
-// `translateY(-scrollTop)`. Block decorations push lines down in the
-// content area, so the gutter inserts matching spacer divs between
-// line numbers to stay aligned.
-//
-// `gutterRef` exposes the gutter element so the scroll handler can
-// update its transform imperatively (same frame as the scroll event,
-// no SolidJS re-render lag) to prevent the one-frame shake otherwise
-// produced by the signal-driven translateY path.
-function GutterContainer(props) {
-  // Flat list of gutter items: { type: 'line', ...rowData } or
-  // { type: 'block', height }.  Built as a memo so it reacts to both
-  // visibleRows and sortedBlocks changes.
-  const gutterItems = createMemo(() => {
-    const rows = props.visibleRows();
-    const blocks = props.sortedBlocks();
-    const items = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      for (let j = 0; j < blocks.length; j++) {
-        const b = blocks[j];
-        if (b.row === row.screenRow && b.position === 'before') {
-          items.push({ type: 'block', height: b.height, key: b });
-        }
-      }
-      items.push({ type: 'line', ...row });
-      for (let j = 0; j < blocks.length; j++) {
-        const b = blocks[j];
-        if (b.row === row.screenRow && b.position === 'after') {
-          items.push({ type: 'block', height: b.height, key: b });
-        }
-      }
-    }
-    return items;
-  });
-
-  return (
-    <div
-      ref={props.gutterRef}
-      class="gutter line-numbers"
-      gutter-name="line-number"
-    >
-      <div style={`height: ${props.topSpacer()}px; display: block;`} />
-      <For each={gutterItems()}>
-        {(item) => (
-          item.type === 'block'
-            ? <div style={`height: ${item.height}px; display: block;`} />
-            : <LineNumber
-                row={item.screenRow}
-                bufferRow={item.bufferRow}
-                softWrapped={item.softWrapped}
-                foldable={item.foldable}
-                lineNumberDecoClasses={props.lineNumberDecoClasses}
-                showLineNumbers={props.showLineNumbers()}
-                maxDigits={props.maxDigits()}
-              />
-        )}
-      </For>
-      <div style={`height: ${props.bottomSpacer()}px; display: block;`} />
-    </div>
-  );
-}
-
-// One custom gutter (anything that isn't the line-number gutter).
-// Mirrors the legacy editor's `CustomGutterComponent`:
-//   <div class="gutter <gutter.className>" gutter-name="<name>">
-//     <div class="custom-decorations" style="height: <total>px">
-//       <div class="decoration <class>" style="position: absolute;
-//            top: pixelTopForRow(start.row);
-//            height: pixelTopForRow(end.row + 1) - top">
-//         [decoration.item]
-//       </div>
-//       ...
-//     </div>
-//   </div>
-//
-// `pixelTopForRow` is the editor's row-to-px helper that already
-// accounts for block-decoration heights, so custom-gutter decorations
-// stay aligned with the lines they apply to even when blocks push
-// rows down. Vertical sync with the scroller is via the
-// `translateY(-scrollTop)` on the inner element, same as the
-// line-number gutter.
-function CustomGutter(props) {
-  return (
-    <div
-      class={'gutter' + (props.gutter.className ? ' ' + props.gutter.className : '')}
-      gutter-name={props.gutter.name}
-    >
-      <div
-        class="custom-decorations"
-        style={'position: relative; height: ' + props.contentHeight() + 'px;'}
-      >
-        <For each={props.decorations()}>
-          {(d) => (
-            <CustomGutterDecoration
-              decoration={d}
-              topForRow={props.topForRow}
-              lineHeight={props.lineHeight}
-            />
-          )}
-        </For>
-      </div>
-    </div>
-  );
-}
-
-// A single custom-gutter decoration spanning `decoration.range`. Uses
-// a `ref` callback to attach `decoration.item` (when present) to the
-// rendered div the same way `<BlockDecoration>` attaches its item;
-// `appendChild` of an already-attached element implicitly removes it
-// from its previous parent, so re-mounting after a viewport change
-// just works.
-function CustomGutterDecoration(props) {
-  const style = () => {
-    const lh = props.lineHeight();
-    if (!lh) return 'display: none;';
-    const range = props.decoration.range;
-    const top = props.topForRow(range.start.row);
-    const bottom = props.topForRow(range.end.row + 1);
-    const height = Math.max(lh, bottom - top);
-    return (
-      'position: absolute; left: 0; right: 0; ' +
-      'top: ' + top + 'px; ' +
-      'height: ' + height + 'px;'
-    );
-  };
-  const cls = () => 'decoration' + (props.decoration.class ? ' ' + props.decoration.class : '');
-  return (
-    <div
-      class={cls()}
-      style={style()}
-      ref={(el) => {
-        const item = props.decoration.item;
-        if (!item || !el) return;
-        const node = item.element || item;
-        if (node && node.nodeType === 1 && node.parentNode !== el) {
-          el.appendChild(node);
-        }
-      }}
-    />
-  );
-}
 
 // Converts a screen-range into a list of absolutely-positioned rect
 // descriptors. Callers map these to `.region` divs inside a `.selection`
@@ -772,7 +588,6 @@ function Editor(props) {
   });
 
   // --- refs ---
-  let measureRef;
   let scrollerRef;
   let linesWrapperRef;
   let bottomSpacerRef;
@@ -1375,27 +1190,9 @@ function Editor(props) {
 
   // --- measurement ---
 
-  const measure = () => {
-    if (!measureRef) return false;
-    const lineEl = measureRef.querySelector('.measure-line');
-    const spanEl = measureRef.querySelector('.measure-chars');
-    if (!lineEl || !spanEl) return false;
-    const lineRect = lineEl.getBoundingClientRect();
-    const spanRect = spanEl.getBoundingClientRect();
-    if (!lineRect.height || !spanRect.width) return false;
-    const lh = lineRect.height;
-    const cw = spanRect.width / 100;
-    setLineHeight(lh);
-    setCharWidth(cw);
-    component._lineHeight = lh;
-    component._charWidth = cw;
-    // Keep model measurements in sync so external callers (vim-mode-plus,
-    // etc.) that use editor.getLineHeightInPixels() / getDefaultCharWidth()
-    // get real values rather than the 0/null they were initialised with.
-    if (model.setLineHeightInPixels) model.setLineHeightInPixels(lh);
-    if (model.setDefaultCharWidth) model.setDefaultCharWidth(cw, cw, cw, cw);
-    return true;
-  };
+  const { measure, MeasureFixture, measureRO } = createMeasurement({
+    component, model, setLineHeight, setCharWidth
+  });
 
   onMount(() => {
     component._scroller = scrollerRef;
@@ -1446,12 +1243,6 @@ function Editor(props) {
     setViewportHeight(scrollerRef.clientHeight);
     setViewportWidth(scrollerRef.clientWidth);
 
-    const measureRO = new ResizeObserver(() => { measure(); });
-    if (measureRef) {
-      const lineEl = measureRef.querySelector('.measure-line');
-      if (lineEl) measureRO.observe(lineEl);
-    }
-
     onCleanup(() => {
       scrollerRef.removeEventListener('scroll', onScroll);
       ro.disconnect();
@@ -1491,21 +1282,7 @@ function Editor(props) {
         'overflow: hidden; box-sizing: border-box;'
       }
     >
-      {/* Hidden measurement fixture. The `.measure-line` block gives us
-          the full rendered line height (including leading); the inner
-          `.measure-chars` span gives us the average character width. */}
-      <div
-        ref={(el) => (measureRef = el)}
-        aria-hidden="true"
-        style={
-          'position: absolute; left: -9999px; top: 0; ' +
-          'visibility: hidden; pointer-events: none;'
-        }
-      >
-        <div class="measure-line" style="display: block; white-space: pre;">
-          <span class="measure-chars">{'x'.repeat(100)}</span>
-        </div>
-      </div>
+      <MeasureFixture />
 
       {/* Main editor body: gutter (fixed-width, no horizontal scroll) +
           scroll-view (takes the rest, scrolls both axes). The gutter lives
