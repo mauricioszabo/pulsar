@@ -309,6 +309,17 @@ function LineNumber(props) {
 // The flat item list merges visibleRows and sortedBlocks into a single
 // memo so any change to either (new block added, block resized, row
 // scrolled into view) triggers exactly one re-render of the <For>.
+// The line-number gutter — emits a single `.gutter.line-numbers`
+// element. Wrapped by the editor in a shared `.gutter-container` div
+// so this gutter and any custom gutters scroll together via one
+// `translateY(-scrollTop)`. Block decorations push lines down in the
+// content area, so the gutter inserts matching spacer divs between
+// line numbers to stay aligned.
+//
+// `gutterRef` exposes the gutter element so the scroll handler can
+// update its transform imperatively (same frame as the scroll event,
+// no SolidJS re-render lag) to prevent the one-frame shake otherwise
+// produced by the signal-driven translateY path.
 function GutterContainer(props) {
   // Flat list of gutter items: { type: 'line', ...rowData } or
   // { type: 'block', height }.  Built as a memo so it reacts to both
@@ -338,39 +349,108 @@ function GutterContainer(props) {
 
   return (
     <div
-      class="gutter-container"
-      style={
-        'position: relative; z-index: 1; flex-shrink: 0; ' +
-        'background-color: inherit; overflow: hidden; user-select: none;'
-      }
+      ref={props.gutterRef}
+      class="gutter line-numbers"
+      gutter-name="line-number"
+    >
+      <div style={`height: ${props.topSpacer()}px; display: block;`} />
+      <For each={gutterItems()}>
+        {(item) => (
+          item.type === 'block'
+            ? <div style={`height: ${item.height}px; display: block;`} />
+            : <LineNumber
+                row={item.screenRow}
+                bufferRow={item.bufferRow}
+                softWrapped={item.softWrapped}
+                foldable={item.foldable}
+                lineNumberDecoClasses={props.lineNumberDecoClasses}
+                showLineNumbers={props.showLineNumbers()}
+                maxDigits={props.maxDigits()}
+              />
+        )}
+      </For>
+      <div style={`height: ${props.bottomSpacer()}px; display: block;`} />
+    </div>
+  );
+}
+
+// One custom gutter (anything that isn't the line-number gutter).
+// Mirrors the legacy editor's `CustomGutterComponent`:
+//   <div class="gutter <gutter.className>" gutter-name="<name>">
+//     <div class="custom-decorations" style="height: <total>px">
+//       <div class="decoration <class>" style="position: absolute;
+//            top: pixelTopForRow(start.row);
+//            height: pixelTopForRow(end.row + 1) - top">
+//         [decoration.item]
+//       </div>
+//       ...
+//     </div>
+//   </div>
+//
+// `pixelTopForRow` is the editor's row-to-px helper that already
+// accounts for block-decoration heights, so custom-gutter decorations
+// stay aligned with the lines they apply to even when blocks push
+// rows down. Vertical sync with the scroller is via the
+// `translateY(-scrollTop)` on the inner element, same as the
+// line-number gutter.
+function CustomGutter(props) {
+  return (
+    <div
+      class={'gutter' + (props.gutter.className ? ' ' + props.gutter.className : '')}
+      gutter-name={props.gutter.name}
     >
       <div
-        ref={props.gutterRef}
-        class="gutter line-numbers"
-        style={
-          'will-change: transform; ' +
-          'transform: translateY(' + (-props.scrollTop()) + 'px);'
-        }
+        class="custom-decorations"
+        style={'position: relative; height: ' + props.contentHeight() + 'px;'}
       >
-        <div style={`height: ${props.topSpacer()}px; display: block;`} />
-        <For each={gutterItems()}>
-          {(item) => (
-            item.type === 'block'
-              ? <div style={`height: ${item.height}px; display: block;`} />
-              : <LineNumber
-                  row={item.screenRow}
-                  bufferRow={item.bufferRow}
-                  softWrapped={item.softWrapped}
-                  foldable={item.foldable}
-                  lineNumberDecoClasses={props.lineNumberDecoClasses}
-                  showLineNumbers={props.showLineNumbers()}
-                  maxDigits={props.maxDigits()}
-                />
+        <For each={props.decorations()}>
+          {(d) => (
+            <CustomGutterDecoration
+              decoration={d}
+              topForRow={props.topForRow}
+              lineHeight={props.lineHeight}
+            />
           )}
         </For>
-        <div style={`height: ${props.bottomSpacer()}px; display: block;`} />
       </div>
     </div>
+  );
+}
+
+// A single custom-gutter decoration spanning `decoration.range`. Uses
+// a `ref` callback to attach `decoration.item` (when present) to the
+// rendered div the same way `<BlockDecoration>` attaches its item;
+// `appendChild` of an already-attached element implicitly removes it
+// from its previous parent, so re-mounting after a viewport change
+// just works.
+function CustomGutterDecoration(props) {
+  const style = () => {
+    const lh = props.lineHeight();
+    if (!lh) return 'display: none;';
+    const range = props.decoration.range;
+    const top = props.topForRow(range.start.row);
+    const bottom = props.topForRow(range.end.row + 1);
+    const height = Math.max(lh, bottom - top);
+    return (
+      'position: absolute; left: 0; right: 0; ' +
+      'top: ' + top + 'px; ' +
+      'height: ' + height + 'px;'
+    );
+  };
+  const cls = () => 'decoration' + (props.decoration.class ? ' ' + props.decoration.class : '');
+  return (
+    <div
+      class={cls()}
+      style={style()}
+      ref={(el) => {
+        const item = props.decoration.item;
+        if (!item || !el) return;
+        const node = item.element || item;
+        if (node && node.nodeType === 1 && node.parentNode !== el) {
+          el.appendChild(node);
+        }
+      }}
+    />
   );
 }
 
@@ -426,6 +506,39 @@ function SelectionHighlight(props) {
   });
   return (
     <div class="highlight selection">
+      <For each={rects()}>
+        {(r) => (
+          <div
+            class="region"
+            style={
+              'position: absolute; box-sizing: border-box; ' +
+              'top: ' + r.top + 'px; ' +
+              'left: ' + r.left + 'px; ' +
+              'height: ' + r.height + 'px; ' +
+              (r.right != null ? 'right: 0; ' : 'width: ' + r.width + 'px; ')
+            }
+          />
+        )}
+      </For>
+    </div>
+  );
+}
+
+// Generic non-selection `type: 'highlight'` decoration. Same DOM
+// shape as `SelectionHighlight` (`.highlight.<class> > .region`) so
+// the existing theme rules — `.find-result .region`, `.bracket-matcher
+// .region`, `.current-result .region`, package-supplied custom
+// classes — apply unchanged.
+function Highlight(props) {
+  const rects = createMemo(() => {
+    const lh = props.lineHeight();
+    const cw = props.charWidth();
+    if (!lh || !cw) return [];
+    return rangeToRects(props.range, lh, cw, props.topForRow);
+  });
+  const cls = () => 'highlight' + (props.class ? ' ' + props.class : '');
+  return (
+    <div class={cls()}>
       <For each={rects()}>
         {(r) => (
           <div
@@ -1073,6 +1186,103 @@ function Editor(props) {
     return byRow;
   });
 
+  // `type: 'highlight'` decorations for the rendered viewport. Each
+  // entry is `{ key, class, range }` and renders as `.highlight.<class>
+  // > .region` rectangles via the `<Highlight>` component.
+  //
+  // Selection-class highlights are excluded here because they already
+  // come through `selectionRanges` (driven by `editor.getSelections()`),
+  // and rendering them twice produces a visibly heavier overlay.
+  const highlightDecorations = createMemo((prev) => {
+    decorationsVersion();
+    selectionsVersion();
+    displayVersion();
+    if (!isModelAlive() || !model.decorationManager) return prev || [];
+    const dm = model.decorationManager;
+    if (!dm.decorationPropertiesByMarkerForScreenRowRange) return prev || [];
+    const first = firstRenderedRow();
+    const last = lastRenderedRow();
+    const propsByMarker = dm.decorationPropertiesByMarkerForScreenRowRange(
+      first,
+      last + 1
+    );
+    const out = [];
+    for (const [marker, decos] of propsByMarker) {
+      const range = marker.getScreenRange ? marker.getScreenRange() : null;
+      if (!range || range.isEmpty()) continue;
+      for (let i = 0; i < decos.length; i++) {
+        const d = decos[i];
+        if (!d) continue;
+        const isHighlight = Array.isArray(d.type)
+          ? d.type.indexOf('highlight') !== -1
+          : d.type === 'highlight';
+        if (!isHighlight) continue;
+        if (d.class === 'selection') continue;
+        out.push({
+          key: marker.id + ':' + (d.class || '') + ':' + i,
+          class: d.class || '',
+          range
+        });
+      }
+    }
+    return out;
+  }, []);
+
+  // `type: 'gutter'` decorations partitioned by gutter name (excluding
+  // 'line-number' which goes through `lineNumberDecoClasses`).
+  // Returns `Map<gutterName, Array<{ key, class, range, item }>>`.
+  // Each entry renders as one absolutely-positioned div inside its
+  // gutter, spanning the marker's screen range — same shape the legacy
+  // editor's `CustomGutterComponent` expects. Used by packages like
+  // git-diff to draw colored bars in the diff status column.
+  const customGutterDecorations = createMemo((prev) => {
+    decorationsVersion();
+    displayVersion();
+    if (!isModelAlive() || !model.decorationManager) return prev || new Map();
+    const dm = model.decorationManager;
+    if (!dm.decorationPropertiesByMarkerForScreenRowRange) {
+      return prev || new Map();
+    }
+    const total = model.getScreenLineCount();
+    const propsByMarker = dm.decorationPropertiesByMarkerForScreenRowRange(0, total);
+    const byGutter = new Map();
+    for (const [marker, decos] of propsByMarker) {
+      const range = marker.getScreenRange ? marker.getScreenRange() : null;
+      if (!range) continue;
+      for (let i = 0; i < decos.length; i++) {
+        const d = decos[i];
+        if (!d) continue;
+        const types = Array.isArray(d.type) ? d.type : [d.type];
+        if (types.indexOf('gutter') === -1) continue;
+        const name = d.gutterName;
+        if (!name || name === 'line-number') continue;
+        let bucket = byGutter.get(name);
+        if (!bucket) { bucket = []; byGutter.set(name, bucket); }
+        bucket.push({
+          key: marker.id + ':' + i,
+          class: d.class || '',
+          range,
+          item: d.item || null
+        });
+      }
+    }
+    return byGutter;
+  }, new Map());
+
+  // List of gutters to render (line-number first, then custom in
+  // priority order). Reactive on display version so packages adding/
+  // removing custom gutters refresh us.
+  const guttersToRender = createMemo((prev) => {
+    displayVersion();
+    if (!isModelAlive() || !model.getGutters) return prev || [];
+    const arr = [];
+    for (const g of model.getGutters()) {
+      if (!g || (g.isVisible && !g.isVisible())) continue;
+      arr.push(g);
+    }
+    return arr;
+  }, []);
+
   // Build full cursor descriptors: position + merged class/style from
   // any `type: 'cursor'` decorations attached to the cursor's marker.
   // vim-mode-plus uses cursor decorations with `style: { top, left }`
@@ -1423,6 +1633,23 @@ function Editor(props) {
                 {(range) => (
                   <SelectionHighlight
                     range={range}
+                    lineHeight={lineHeight}
+                    charWidth={charWidth}
+                    topForRow={pixelTopForRow}
+                  />
+                )}
+              </For>
+              {/* Generic `type: 'highlight'` decorations: find-and-
+                  replace results, vim search hits, bracket-matcher,
+                  linter underlines, package-supplied custom classes.
+                  Selection-class highlights are filtered out of
+                  `highlightDecorations` since they already render
+                  through `selectionRanges` above. */}
+              <For each={highlightDecorations()}>
+                {(h) => (
+                  <Highlight
+                    range={h.range}
+                    class={h.class}
                     lineHeight={lineHeight}
                     charWidth={charWidth}
                     topForRow={pixelTopForRow}
