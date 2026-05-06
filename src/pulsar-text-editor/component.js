@@ -719,6 +719,10 @@ class PulsarTextEditorComponent {
       return;
     }
 
+    // If the click landed inside a block decoration, let it propagate
+    // normally so links and interactive elements inside blocks work.
+    if (target && target.closest('.block-decoration')) return;
+
     event.preventDefault();
     const screenPosition = this._screenPositionForMouse(event);
 
