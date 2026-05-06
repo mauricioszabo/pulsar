@@ -249,13 +249,19 @@ function Line(props) {
     const item = props.item;
     const cw = props.charWidth();
     if (!cw) return '';
+    const lh = props.lineHeight ? props.lineHeight() : 0;
+    // Enforce an explicit height and overflow:hidden so that borders or
+    // backgrounds applied to inline spans (e.g. .trailing-whitespace) cannot
+    // expand the row beyond lineHeight and desync the gutter.
+    const heightStyle = lh ? 'height: ' + lh + 'px; overflow: hidden; ' : '';
     const fullLen = item.lineLength;
     if (item.mode === 'short') {
-      return 'min-width: ' + (fullLen * cw) + 'px;';
+      return heightStyle + 'min-width: ' + (fullLen * cw) + 'px;';
     }
     const range = props.visibleColumnRange();
     const leftPad = range ? Math.max(0, range[0]) * cw : 0;
-    return 'padding-left: ' + leftPad + 'px; ' +
+    return heightStyle +
+           'padding-left: ' + leftPad + 'px; ' +
            'min-width: ' + (fullLen * cw) + 'px;';
   };
   return (
@@ -563,12 +569,16 @@ function Editor(props) {
     }
   };
 
-  // scrollTop and scrollLeft are kept in sync with the scroller DOM
-  // element via a scroll event listener installed in onMount.
-  const [scrollTop, setScrollTop] = createSignal(0);
-  const [scrollLeft, setScrollLeft] = createSignal(0);
-  component._setScrollTopSignal = setScrollTop;
-  component._setScrollLeftSignal = setScrollLeft;
+  // Scroll position is stored as plain JS values on `component` and read
+  // directly by memos — no signals. A single `renderVersion` signal is
+  // bumped whenever scroll changes so that firstRenderedRow/lastRenderedRow
+  // and visibleColumnRange recompute. This avoids the ordering fight where
+  // setting a scrollTop signal synchronously flushes SolidJS, shrinks the
+  // spacers, and causes the browser to clamp the scrollTop we set next.
+  component._scrollTopValue = 0;
+  component._scrollLeftValue = 0;
+  const [renderVersion, bumpRender] = createSignal(0);
+  component._bumpRender = () => bumpRender((v) => v + 1);
 
   // Viewport height in px, updated on resize.
   const [viewportHeight, setViewportHeight] = createSignal(0);
@@ -650,17 +660,19 @@ function Editor(props) {
   };
 
   const firstRenderedRow = createMemo(() => {
+    renderVersion();
     const lh = lineHeight();
     if (!lh) return 0;
-    return Math.max(0, rowAtPixel(scrollTop()) - OVERSCAN);
+    return Math.max(0, rowAtPixel(component._scrollTopValue) - OVERSCAN);
   });
 
   const lastRenderedRow = createMemo(() => {
+    renderVersion();
     const lh = lineHeight();
     const total = totalScreenRows();
     if (!lh) return Math.min(total - 1, OVERSCAN * 2);
     const viewH = viewportHeight() || (scrollerRef ? scrollerRef.clientHeight : 0);
-    return Math.min(total - 1, rowAtPixel(scrollTop() + viewH) + OVERSCAN);
+    return Math.min(total - 1, rowAtPixel(component._scrollTopValue + viewH) + OVERSCAN);
   });
 
   // [startCol, endCol] for column-range virtualization on long lines.
@@ -673,11 +685,12 @@ function Editor(props) {
   // a viewport-sized window; the next render (once real measurements
   // arrive) corrects the values.
   const visibleColumnRange = createMemo(() => {
+    renderVersion();
     let cw = charWidth();
     if (!cw) cw = 8;
     let vw = viewportWidth() || (scrollerRef ? scrollerRef.clientWidth : 0);
     if (!vw) vw = (typeof window !== 'undefined' ? window.innerWidth : 1024);
-    const sl = scrollLeft();
+    const sl = component._scrollLeftValue;
     const startCol = Math.max(0, Math.floor(sl / cw) - COLUMN_OVERSCAN);
     const endCol = Math.ceil((sl + vw) / cw) + COLUMN_OVERSCAN;
     return [startCol, endCol];
@@ -1248,14 +1261,15 @@ function Editor(props) {
       afterMeasure();
     }
 
-    // Sync scroll position signals with the DOM.
+    // Sync scroll position with the DOM.
     const onScroll = () => {
       const st = scrollerRef.scrollTop;
       const sl = scrollerRef.scrollLeft;
-      setScrollTop(st);
-      setScrollLeft(sl);
+      component._scrollTopValue = st;
+      component._scrollLeftValue = sl;
       component.scrollTop = st;
       component.scrollLeft = sl;
+      bumpRender((v) => v + 1);
       // Sync gutter translateY imperatively — same frame as the scroll
       // event, before SolidJS re-renders — so the gutter never lags the
       // content by one frame (which causes a visible shaking effect).
@@ -1333,7 +1347,7 @@ function Editor(props) {
 
         <Show when={showGutter()}>
           <GutterContainer
-            scrollTop={scrollTop}
+            scrollTop={() => component._scrollTopValue}
             visibleRows={visibleRows}
             topSpacer={topSpacer}
             bottomSpacer={bottomSpacer}
@@ -1398,6 +1412,7 @@ function Editor(props) {
                     displayLayer={displayLayer}
                     visibleColumnRange={visibleColumnRange}
                     charWidth={charWidth}
+                    lineHeight={lineHeight}
                     cursorLine={cursorRows().has(item.row)}
                   />
                   {/* Block decorations with position 'after' render
@@ -1559,12 +1574,14 @@ class PulsarTextEditorComponent {
     this._lineHeight = 0;
     this._charWidth = 0;
 
+    this._scrollTopValue = 0;
+    this._scrollLeftValue = 0;
+
     // Set by the Editor Solid component after it mounts.
     this._notifyDisplayChange = null;
     this._notifySelectionChange = null;
     this._notifyDecorationsChange = null;
-    this._setScrollTopSignal = null;
-    this._setScrollLeftSignal = null;
+    this._bumpRender = null;
     this._restartBlink = null;
     this._scroller = null;
     this._linesWrapper = null;
@@ -1913,22 +1930,20 @@ class PulsarTextEditorComponent {
     // does NOT fire a scroll event. The model still holds the logical
     // scroll position; restore it so the virtual row range stays correct.
     if (this._scroller) {
-      const modelTop = this.scrollTop || 0;
-      const modelLeft = this.scrollLeft || 0;
-      this._scroller.scrollTop = modelTop;
-      this._scroller.scrollLeft = modelLeft;
-      if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
-      if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
+      this._scroller.scrollTop = this.scrollTop || 0;
+      this._scroller.scrollLeft = this.scrollLeft || 0;
+      this._scrollTopValue = this._scroller.scrollTop;
+      this._scrollLeftValue = this._scroller.scrollLeft;
+      if (this._bumpRender) this._bumpRender();
       // Retry on the next frame: after SolidJS re-renders the virtual rows
       // the content is tall enough to accept the full scroll value.
-      // Use this.scrollTop rather than the captured modelTop — a pending
-      // autoscroll may have updated it between now and the rAF firing.
       requestAnimationFrame(() => {
         if (!this._scroller) return;
         this._scroller.scrollTop = this.scrollTop || 0;
         this._scroller.scrollLeft = this.scrollLeft || 0;
-        if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
-        if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
+        this._scrollTopValue = this._scroller.scrollTop;
+        this._scrollLeftValue = this._scroller.scrollLeft;
+        if (this._bumpRender) this._bumpRender();
         if (this._gutterInnerRef) {
           this._gutterInnerRef.style.transform = 'translateY(' + (-this._scroller.scrollTop) + 'px)';
         }
@@ -2112,9 +2127,6 @@ class PulsarTextEditorComponent {
     );
     const margin = marginLines * lh;
 
-    // Use this.scrollTop (optimistically updated) not this._scroller.scrollTop
-    // (the DOM, which may lag behind a pending rAF) so we correctly detect
-    // whether the range is already visible at the intended scroll position.
     const currentScrollTop = this.scrollTop;
     let targetScrollTop = currentScrollTop;
     if (options && options.center) {
@@ -2130,26 +2142,18 @@ class PulsarTextEditorComponent {
 
     if (targetScrollTop === currentScrollTop) return;
 
-    // Optimistically store the target so re-entrant calls see it.
     this.scrollTop = targetScrollTop;
+    this._scrollTopValue = targetScrollTop;
+    if (this._bumpRender) this._bumpRender();
 
-    // Phase 1: update the signal so SolidJS renders the correct row window.
-    // This changes topSpacer/bottomSpacer synchronously.
-    if (this._setScrollTopSignal) this._setScrollTopSignal(targetScrollTop);
-
-    // Phase 2: clamp to real maxScrollTop now that scrollHeight is correct.
     const maxScrollTop = Math.max(0, this._scroller.scrollHeight - viewH);
     const clampedTarget = Math.min(targetScrollTop, maxScrollTop);
     this.scrollTop = clampedTarget;
+    this._scrollTopValue = clampedTarget;
     this._scroller.scrollTop = clampedTarget;
-    const actual = this._scroller.scrollTop;
-    if (actual !== clampedTarget && this._setScrollTopSignal) {
-      this.scrollTop = actual;
-      this._setScrollTopSignal(actual);
-    }
 
     if (this._gutterInnerRef) {
-      this._gutterInnerRef.style.transform = 'translateY(' + (-this.scrollTop) + 'px)';
+      this._gutterInnerRef.style.transform = 'translateY(' + (-clampedTarget) + 'px)';
     }
   }
 
@@ -2276,7 +2280,9 @@ class PulsarTextEditorComponent {
   setScrollTop(top) {
     const v = Math.max(0, top || 0);
     this.scrollTop = v;
+    this._scrollTopValue = v;
     if (this._scroller) this._scroller.scrollTop = v;
+    if (this._bumpRender) this._bumpRender();
     return v;
   }
 
@@ -2284,7 +2290,9 @@ class PulsarTextEditorComponent {
   setScrollLeft(left) {
     const v = Math.max(0, left || 0);
     this.scrollLeft = v;
+    this._scrollLeftValue = v;
     if (this._scroller) this._scroller.scrollLeft = v;
+    if (this._bumpRender) this._bumpRender();
     return v;
   }
 
