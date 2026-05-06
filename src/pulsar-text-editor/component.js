@@ -813,7 +813,7 @@ function Editor(props) {
   const lineCache = new Map();
   const LINE_CACHE_SLACK = 200;
   const visibleScreenLines = createMemo((prev) => {
-    displayVersion();
+    const dv = displayVersion();
     if (!isModelAlive()) return prev || [];
     const first = firstRenderedRow();
     const last = lastRenderedRow();
@@ -845,15 +845,21 @@ function Editor(props) {
         const screenLine = model.screenLineForScreenRow(r);
         const mode = length > LONG_LINE_THRESHOLD ? 'long' : 'short';
         const cached = lineCache.get(r);
+        // Include dv in the cache check: TextMate mutates the screenLine
+        // object's tags in-place after async tokenization, so a stale
+        // cached wrapper with the same screenLine reference would never
+        // re-render. By also comparing dv, any displayVersion bump
+        // (including onDidTokenize) forces a new wrapper and a re-render.
         if (
           cached &&
+          cached.dv === dv &&
           cached.mode === mode &&
           cached.screenLine === screenLine
         ) {
           arr.push(cached);
           continue;
         }
-        wrapper = { row: r, mode, screenLine, lineLength: length };
+        wrapper = { row: r, dv, mode, screenLine, lineLength: length };
       }
       lineCache.set(r, wrapper);
       arr.push(wrapper);
@@ -1200,11 +1206,21 @@ function Editor(props) {
     component._bottomSpacer = bottomSpacerRef;
     component._measure = measure;
 
+    const afterMeasure = () => {
+      if (component._pendingAutoscroll) {
+        const pending = component._pendingAutoscroll;
+        component._pendingAutoscroll = null;
+        component.didRequestAutoscroll(pending);
+      }
+    };
+
     if (!measure()) {
       if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(() => measure());
+        document.fonts.ready.then(() => { measure(); afterMeasure(); });
       }
-      requestAnimationFrame(() => { if (!component._lineHeight) measure(); });
+      requestAnimationFrame(() => { if (!component._lineHeight) measure(); afterMeasure(); });
+    } else {
+      afterMeasure();
     }
 
     // Sync scroll position signals with the DOM.
@@ -1860,6 +1876,8 @@ class PulsarTextEditorComponent {
 
   didAttach() {
     this.attached = true;
+    this.visible = true;
+    this.props.model.setVisible(true);
     if (!PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents = new Set();
     }
@@ -1874,16 +1892,16 @@ class PulsarTextEditorComponent {
       const modelLeft = this.scrollLeft || 0;
       this._scroller.scrollTop = modelTop;
       this._scroller.scrollLeft = modelLeft;
-      // Sync signals to the DOM values (browser may clamp if content is
-      // shorter than modelTop at this point).
       if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
       if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
       // Retry on the next frame: after SolidJS re-renders the virtual rows
-      // the content is tall enough to accept the full modelTop value.
+      // the content is tall enough to accept the full scroll value.
+      // Use this.scrollTop rather than the captured modelTop — a pending
+      // autoscroll may have updated it between now and the rAF firing.
       requestAnimationFrame(() => {
         if (!this._scroller) return;
-        this._scroller.scrollTop = modelTop;
-        this._scroller.scrollLeft = modelLeft;
+        this._scroller.scrollTop = this.scrollTop || 0;
+        this._scroller.scrollLeft = this.scrollLeft || 0;
         if (this._setScrollTopSignal) this._setScrollTopSignal(this._scroller.scrollTop);
         if (this._setScrollLeftSignal) this._setScrollLeftSignal(this._scroller.scrollLeft);
         if (this._gutterInnerRef) {
@@ -1903,6 +1921,8 @@ class PulsarTextEditorComponent {
     // scroll/resize observers alive across detach so re-attach is a
     // no-op visually. Final cleanup, if needed, lives in `destroy()`.
     this.attached = false;
+    this.visible = false;
+    this.props.model.setVisible(false);
     if (PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents.delete(this);
     }
@@ -1944,8 +1964,14 @@ class PulsarTextEditorComponent {
     this._destroyAllOverlays();
   }
 
-  didShow() { this.visible = true; }
-  didHide() { this.visible = false; }
+  didShow() {
+    this.visible = true;
+    this.props.model.setVisible(true);
+  }
+  didHide() {
+    this.visible = false;
+    this.props.model.setVisible(false);
+  }
 
   didFocus(event) {
     // Called by text-editor-element's focus listener (which fires for both
@@ -2019,7 +2045,10 @@ class PulsarTextEditorComponent {
   }
 
   didRequestAutoscroll(autoscroll) {
-    if (!autoscroll || !this._scroller || !this._lineHeight) return;
+    if (!autoscroll || !this._scroller || !this._lineHeight) {
+      this._pendingAutoscroll = autoscroll;
+      return;
+    }
     const { screenRange, options } = autoscroll;
     if (!screenRange) return;
     this._autoscrollVertically(screenRange, options);
