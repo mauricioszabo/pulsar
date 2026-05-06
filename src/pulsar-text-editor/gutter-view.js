@@ -53,8 +53,10 @@ class GutterView {
     this._outerEl.style.display = '';
 
     this.setScrollTop(scrollTop);
-    this._topSpacerEl.style.height = topSpacer + 'px';
-    this._bottomSpacerEl.style.height = bottomSpacer + 'px';
+    const topPx = topSpacer + 'px';
+    if (this._topSpacerEl.style.height !== topPx) this._topSpacerEl.style.height = topPx;
+    const botPx = bottomSpacer + 'px';
+    if (this._bottomSpacerEl.style.height !== botPx) this._bottomSpacerEl.style.height = botPx;
 
     // Build flat interleaved list: [before-blocks, line-number, after-blocks]...
     const newEls = [];
@@ -125,8 +127,8 @@ class GutterView {
     // data-screen-row.
     if (el.dataset.screenRow !== String(screenRow)) el.dataset.screenRow = screenRow;
 
-    // Label text.
-    const span = el.querySelector('.line-number-text');
+    // Label text (firstElementChild is always the .line-number-text span).
+    const span = el.firstElementChild;
     if (span) {
       let label = '';
       if (showLineNumbers) {

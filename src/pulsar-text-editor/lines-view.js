@@ -47,11 +47,14 @@ class LinesView {
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
 
     // Update spacer heights.
-    this._topSpacerEl.style.height = topSpacer + 'px';
-    this._bottomSpacerEl.style.height = bottomSpacer + 'px';
+    const topPx = topSpacer + 'px';
+    if (this._topSpacerEl.style.height !== topPx) this._topSpacerEl.style.height = topPx;
+    const botPx = bottomSpacer + 'px';
+    if (this._bottomSpacerEl.style.height !== botPx) this._bottomSpacerEl.style.height = botPx;
 
     // Drive the scroll container's horizontal extent.
-    this._linesWrapper.style.minWidth = 'max(100%, ' + longestLineWidth + 'px)';
+    const mw = 'max(100%, ' + longestLineWidth + 'px)';
+    if (this._linesWrapper.style.minWidth !== mw) this._linesWrapper.style.minWidth = mw;
 
     // Compute visible screen line wrappers (with caching, same as Solid).
     const buffer = model.getBuffer ? model.getBuffer() : model.buffer;
