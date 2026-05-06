@@ -1,17 +1,19 @@
-'use babel';
+'use strict';
 
 // Creates the measurement infrastructure for deriving line height and
-// character width from the browser's font rendering.
+// character width from the browser's font rendering. Unlike the Solid version,
+// this returns a plain DOM builder (`appendFixtureToEl`) instead of a JSX
+// component, so it can be called anywhere without a Solid render context.
 //
-// Returns `{ measure, MeasureFixture, measureRO }` where:
-//   - `measure()` reads the fixture's bounding rects, updates signals and
-//     model, and returns true on success.
-//   - `MeasureFixture` is a Solid JSX component that renders the hidden
-//     off-screen measurement div and wires the ref internally.
-//   - `measureRO` is a ResizeObserver already observing the fixture's inner
-//     `.measure-line` element so zoom/font changes re-trigger measurement.
-//     Caller must call `measureRO.disconnect()` on cleanup.
-function createMeasurement({ component, model, setLineHeight, setCharWidth }) {
+// Returns `{ measure, appendFixtureToEl, measureRO }` where:
+//   - `measure()` reads the fixture's bounding rects, updates the component
+//     and model, calls `onMeasure(lh, cw)`, and returns true on success.
+//   - `appendFixtureToEl(parentEl)` creates the hidden off-screen measurement
+//     div, appends it to parentEl, and wires the ResizeObserver.
+//   - `measureRO` is the ResizeObserver already observing the fixture's inner
+//     `.measure-line` element. Caller must call `measureRO.disconnect()` on
+//     cleanup.
+function createMeasurement({ component, model, onMeasure }) {
   let _measureEl = null;
 
   const measure = () => {
@@ -24,41 +26,36 @@ function createMeasurement({ component, model, setLineHeight, setCharWidth }) {
     if (!lineRect.height || !spanRect.width) return false;
     const lh = lineRect.height;
     const cw = spanRect.width / 100;
-    setLineHeight(lh);
-    setCharWidth(cw);
     component._lineHeight = lh;
     component._charWidth = cw;
     if (model.setLineHeightInPixels) model.setLineHeightInPixels(lh);
     if (model.setDefaultCharWidth) model.setDefaultCharWidth(cw, cw, cw, cw);
+    if (onMeasure) onMeasure(lh, cw);
     return true;
   };
 
   const measureRO = new ResizeObserver(() => { measure(); });
 
-  function MeasureFixture() {
-    return (
-      <div
-        ref={(el) => {
-          _measureEl = el;
-          if (el) {
-            const lineEl = el.querySelector('.measure-line');
-            if (lineEl) measureRO.observe(lineEl);
-          }
-        }}
-        aria-hidden="true"
-        style={
-          'position: absolute; left: -9999px; top: 0; ' +
-          'visibility: hidden; pointer-events: none;'
-        }
-      >
-        <div class="measure-line" style="display: block; white-space: pre;">
-          <span class="measure-chars">{'x'.repeat(100)}</span>
-        </div>
-      </div>
-    );
-  }
+  const appendFixtureToEl = (parentEl) => {
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute('aria-hidden', 'true');
+    wrapper.style.cssText =
+      'position: absolute; left: -9999px; top: 0; ' +
+      'visibility: hidden; pointer-events: none;';
+    const measureLine = document.createElement('div');
+    measureLine.className = 'measure-line';
+    measureLine.style.cssText = 'display: block; white-space: pre;';
+    const measureChars = document.createElement('span');
+    measureChars.className = 'measure-chars';
+    measureChars.textContent = 'x'.repeat(100);
+    measureLine.appendChild(measureChars);
+    wrapper.appendChild(measureLine);
+    parentEl.appendChild(wrapper);
+    _measureEl = wrapper;
+    measureRO.observe(measureLine);
+  };
 
-  return { measure, MeasureFixture, measureRO };
+  return { measure, appendFixtureToEl, measureRO };
 }
 
 module.exports = { createMeasurement };
