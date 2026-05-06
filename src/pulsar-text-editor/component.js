@@ -511,6 +511,15 @@ function Editor(props) {
       if (info.height !== newHeight) {
         info.height = newHeight;
         bumpBlocks((v) => v + 1);
+        // Re-fire the last autoscroll request now that block heights are
+        // known. This handles the case where autoscroll fires before a
+        // block decoration has been laid out (offsetHeight = 0), causing
+        // pixelBottomForRow to underestimate the scroll target.
+        if (component._lastAutoscroll) {
+          const { screenRange, options } = component._lastAutoscroll;
+          component._autoscrollVertically(screenRange, options);
+          component._autoscrollHorizontally(screenRange, options);
+        }
       }
     });
     ro.observe(element);
@@ -721,8 +730,32 @@ function Editor(props) {
     }
     return row * lh + extra;
   };
+  // Bottom edge of row `row` in the same coordinate system as rowAtPixel —
+  // i.e. top + lh + all 'after' blocks at that row. This is what
+  // _autoscrollVertically uses for `endPx` so targetScrollTop matches
+  // what rowAtPixel would compute when determining firstRenderedRow.
+  const pixelBottomForRow = (row) => {
+    const lh = lineHeight() || 0;
+    const blocks = sortedBlocks();
+    let extra = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row > row) break;
+      if (b.row === row && b.position !== 'before') break;
+      extra += b.height;
+    }
+    // top = row * lh + extra (before-blocks). Now add lh + after-blocks.
+    let afterExtra = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      const b = blocks[i];
+      if (b.row > row) break;
+      if (b.row === row && b.position === 'after') afterExtra += b.height;
+    }
+    return row * lh + extra + lh + afterExtra;
+  };
   // Expose for imperative callers (`pixelPositionForScreenPosition`).
   component._pixelTopForRow = pixelTopForRow;
+  component._pixelBottomForRow = pixelBottomForRow;
   // Block-aware inverse: given a pixel offset from content top, return the
   // screen row that contains it. Exposed so the component class can use it
   // in mouse-click and screenPositionForPixelPosition calculations.
@@ -2051,6 +2084,11 @@ class PulsarTextEditorComponent {
     }
     const { screenRange, options } = autoscroll;
     if (!screenRange) return;
+    // Store so block ResizeObserver callbacks can replay it once block
+    // heights are known. Clear after 500ms to avoid stale replays.
+    this._lastAutoscroll = { screenRange, options };
+    if (this._lastAutoscrollTimer) clearTimeout(this._lastAutoscrollTimer);
+    this._lastAutoscrollTimer = setTimeout(() => { this._lastAutoscroll = null; }, 500);
     this._autoscrollVertically(screenRange, options);
     this._autoscrollHorizontally(screenRange, options);
   }
@@ -2058,29 +2096,20 @@ class PulsarTextEditorComponent {
   _autoscrollVertically(screenRange, options) {
     const lh = this._lineHeight;
     // Account for block decorations above each row so autoscroll lands
-    // on the visible top of the line, not the unblocked `row * lh`
-    // estimate that would leave the line clipped under preceding
-    // block-decoration content.
+    // on the visual top of the line, not the unblocked `row * lh` estimate.
     const startPx = this._pixelTopForRow
       ? this._pixelTopForRow(screenRange.start.row)
       : screenRange.start.row * lh;
-    const endPx = (this._pixelTopForRow
-      ? this._pixelTopForRow(screenRange.end.row)
-      : screenRange.end.row * lh) + lh;
-
-    // SolidJS re-renders asynchronously, so when a new row is added the
-    // bottom spacer DOM height may not yet reflect the new row count.
-    // The browser silently clamps scrollTop to scrollHeight - clientHeight,
-    // so we expand the spacer imperatively before adjusting scrollTop to
-    // ensure the full content height is available immediately.
-    if (this._bottomSpacer) {
-      const totalHeight = this.props.model.getScreenLineCount() * lh;
-      if (this._scroller.scrollHeight < totalHeight) {
-        const current = parseInt(this._bottomSpacer.style.height || '0', 10);
-        const deficit = totalHeight - this._scroller.scrollHeight;
-        this._bottomSpacer.style.height = (current + deficit) + 'px';
-      }
-    }
+    // Use pixelBottomForRow (includes 'after' blocks) so that targetScrollTop
+    // is in the same coordinate system as rowAtPixel. Without this, if there
+    // is a large 'after' block at the end row, endPx underestimates the true
+    // bottom edge and targetScrollTop ends up too small — the signal update
+    // then expands scrollHeight and the last line appears near the top.
+    const endPx = this._pixelBottomForRow
+      ? this._pixelBottomForRow(screenRange.end.row)
+      : (this._pixelTopForRow
+          ? this._pixelTopForRow(screenRange.end.row)
+          : screenRange.end.row * lh) + lh;
 
     const viewH = this._scroller.clientHeight;
     const marginLines = Math.min(
@@ -2091,26 +2120,44 @@ class PulsarTextEditorComponent {
     );
     const margin = marginLines * lh;
 
+    // Use this.scrollTop (optimistically updated) not this._scroller.scrollTop
+    // (the DOM, which may lag behind a pending rAF) so we correctly detect
+    // whether the range is already visible at the intended scroll position.
+    const currentScrollTop = this.scrollTop;
+    let targetScrollTop = currentScrollTop;
     if (options && options.center) {
-      const center = (startPx + endPx) / 2;
-      this._scroller.scrollTop = center - viewH / 2;
-      return;
+      targetScrollTop = (startPx + endPx) / 2 - viewH / 2;
+    } else if (!options || options.reversed !== false) {
+      if (endPx + margin > targetScrollTop + viewH) targetScrollTop = endPx + margin - viewH;
+      if (startPx - margin < targetScrollTop) targetScrollTop = Math.max(0, startPx - margin);
+    } else {
+      if (startPx - margin < targetScrollTop) targetScrollTop = Math.max(0, startPx - margin);
+      if (endPx + margin > targetScrollTop + viewH) targetScrollTop = endPx + margin - viewH;
+    }
+    targetScrollTop = Math.max(0, targetScrollTop);
+
+    if (targetScrollTop === currentScrollTop) return;
+
+    // Optimistically store the target so re-entrant calls see it.
+    this.scrollTop = targetScrollTop;
+
+    // Phase 1: update the signal so SolidJS renders the correct row window.
+    // This changes topSpacer/bottomSpacer synchronously.
+    if (this._setScrollTopSignal) this._setScrollTopSignal(targetScrollTop);
+
+    // Phase 2: clamp to real maxScrollTop now that scrollHeight is correct.
+    const maxScrollTop = Math.max(0, this._scroller.scrollHeight - viewH);
+    const clampedTarget = Math.min(targetScrollTop, maxScrollTop);
+    this.scrollTop = clampedTarget;
+    this._scroller.scrollTop = clampedTarget;
+    const actual = this._scroller.scrollTop;
+    if (actual !== clampedTarget && this._setScrollTopSignal) {
+      this.scrollTop = actual;
+      this._setScrollTopSignal(actual);
     }
 
-    if (!options || options.reversed !== false) {
-      if (endPx + margin > this._scroller.scrollTop + viewH) {
-        this._scroller.scrollTop = endPx + margin - viewH;
-      }
-      if (startPx - margin < this._scroller.scrollTop) {
-        this._scroller.scrollTop = Math.max(0, startPx - margin);
-      }
-    } else {
-      if (startPx - margin < this._scroller.scrollTop) {
-        this._scroller.scrollTop = Math.max(0, startPx - margin);
-      }
-      if (endPx + margin > this._scroller.scrollTop + viewH) {
-        this._scroller.scrollTop = endPx + margin - viewH;
-      }
+    if (this._gutterInnerRef) {
+      this._gutterInnerRef.style.transform = 'translateY(' + (-this.scrollTop) + 'px)';
     }
   }
 
