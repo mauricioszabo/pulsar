@@ -41,7 +41,6 @@ class LinesView {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      displayVersion
     } = state;
 
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
@@ -79,10 +78,10 @@ class LinesView {
         const screenLine = model.screenLineForScreenRow(r);
         const mode = length > LONG_LINE_THRESHOLD ? 'long' : 'short';
         const cached = this._lineCache.get(r);
-        if (cached && cached.dv === displayVersion && cached.mode === mode && cached.screenLine === screenLine) {
+        if (cached && cached.mode === mode && cached.screenLine === screenLine) {
           item = cached;
         } else {
-          item = { row: r, dv: displayVersion, mode, screenLine, lineLength: length };
+          item = { row: r, mode, screenLine, lineLength: length };
           this._lineCache.set(r, item);
         }
       }
@@ -199,8 +198,9 @@ class LinesView {
     if (el.style.cssText !== style) el.style.cssText = style;
 
     // HTML — only update if the content actually changed.
-    // For 'short' lines the key is (row, displayVersion); for 'long'/'plain'
-    // the rendered slice also depends on the visible column range.
+    // For 'short' lines the key is the cached screenLine object; for
+    // 'long'/'plain' the rendered slice also depends on the visible column
+    // range.
     const colKey = (item.mode !== 'short' && visColRange)
       ? visColRange[0] + ',' + visColRange[1]
       : '';
@@ -222,22 +222,38 @@ class LinesView {
     return el;
   }
 
-  // Replace variable content (everything between topSpacer and bottomSpacer)
-  // with `newEls`, reusing existing nodes via DOM moves (no clone/recreate).
+  // Reconcile variable content (everything between topSpacer and bottomSpacer)
+  // with `newEls`, reusing existing nodes and leaving already-ordered nodes in
+  // place. This keeps cursor blink / selection-only renders from detaching and
+  // reattaching every visible line.
   _reconcile(newEls) {
     const wrapper = this._linesWrapper;
-    // Collect current variable children.
-    const toRemove = [];
+    const newElSet = new Set(newEls);
+
     let child = this._topSpacerEl.nextSibling;
-    while (child && child !== this._bottomSpacerEl) {
-      toRemove.push(child);
-      child = child.nextSibling;
-    }
-    for (const el of toRemove) {
-      if (el.parentNode === wrapper) wrapper.removeChild(el);
-    }
+
     for (const el of newEls) {
-      wrapper.insertBefore(el, this._bottomSpacerEl);
+      while (child && child !== this._bottomSpacerEl && !newElSet.has(child)) {
+        const next = child.nextSibling;
+        wrapper.removeChild(child);
+        child = next;
+      }
+
+      if (child === el) {
+        child = child.nextSibling;
+      } else {
+        wrapper.insertBefore(
+          el,
+          child && child !== this._bottomSpacerEl ? child : this._bottomSpacerEl
+        );
+        child = el.nextSibling;
+      }
+    }
+
+    while (child && child !== this._bottomSpacerEl) {
+      const next = child.nextSibling;
+      wrapper.removeChild(child);
+      child = next;
     }
   }
 

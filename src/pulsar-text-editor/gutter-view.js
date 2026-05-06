@@ -141,20 +141,36 @@ class GutterView {
     return el;
   }
 
-  // Replace variable content between topSpacer and bottomSpacer.
+  // Reconcile variable content between topSpacer and bottomSpacer without
+  // detaching rows that are already in the correct position.
   _reconcile(newEls) {
     const inner = this._innerEl;
-    const toRemove = [];
+    const newElSet = new Set(newEls);
+
     let child = this._topSpacerEl.nextSibling;
-    while (child && child !== this._bottomSpacerEl) {
-      toRemove.push(child);
-      child = child.nextSibling;
-    }
-    for (const el of toRemove) {
-      if (el.parentNode === inner) inner.removeChild(el);
-    }
+
     for (const el of newEls) {
-      inner.insertBefore(el, this._bottomSpacerEl);
+      while (child && child !== this._bottomSpacerEl && !newElSet.has(child)) {
+        const next = child.nextSibling;
+        inner.removeChild(child);
+        child = next;
+      }
+
+      if (child === el) {
+        child = child.nextSibling;
+      } else {
+        inner.insertBefore(
+          el,
+          child && child !== this._bottomSpacerEl ? child : this._bottomSpacerEl
+        );
+        child = el.nextSibling;
+      }
+    }
+
+    while (child && child !== this._bottomSpacerEl) {
+      const next = child.nextSibling;
+      inner.removeChild(child);
+      child = next;
     }
   }
 

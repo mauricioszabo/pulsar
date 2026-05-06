@@ -102,9 +102,6 @@ class PulsarTextEditorComponent {
     this._viewportHeight = 0;
     this._viewportWidth = 0;
 
-    // Version counters bumped by model events; drive render scheduling.
-    this._displayVersion = 0;
-
     // Blink state.
     this._blinkOff = false;
     this._blinkInterval = null;
@@ -268,10 +265,11 @@ class PulsarTextEditorComponent {
       );
     }
 
-    // TextMate tokenizes asynchronously — bump display version when done.
+    // TextMate tokenizes asynchronously. Display-layer highlighting changes
+    // invalidate affected screen-line objects; this final event only needs a
+    // scheduled frame for any pending observers.
     if (this.props.model.onDidTokenize) {
       this._tokenizeSub = this.props.model.onDidTokenize(() => {
-        this._displayVersion++;
         this._scheduleUpdate();
       });
     }
@@ -448,7 +446,6 @@ class PulsarTextEditorComponent {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      displayVersion: this._displayVersion
     });
 
     this._gutterView.update({
@@ -902,12 +899,10 @@ class PulsarTextEditorComponent {
   // --- Model callbacks ------------------------------------------------------
 
   didChangeDisplayLayer(_changes) {
-    this._displayVersion++;
     this._scheduleUpdate();
   }
 
   didResetDisplayLayer() {
-    this._displayVersion++;
     this._scheduleUpdate();
   }
 
