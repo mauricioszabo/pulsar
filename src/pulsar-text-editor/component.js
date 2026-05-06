@@ -741,17 +741,9 @@ function Editor(props) {
     for (let i = 0; i < blocks.length; i++) {
       const b = blocks[i];
       if (b.row > row) break;
-      if (b.row === row && b.position !== 'before') break;
       extra += b.height;
     }
-    // top = row * lh + extra (before-blocks). Now add lh + after-blocks.
-    let afterExtra = 0;
-    for (let i = 0; i < blocks.length; i++) {
-      const b = blocks[i];
-      if (b.row > row) break;
-      if (b.row === row && b.position === 'after') afterExtra += b.height;
-    }
-    return row * lh + extra + lh + afterExtra;
+    return row * lh + extra + lh;
   };
   // Expose for imperative callers (`pixelPositionForScreenPosition`).
   component._pixelTopForRow = pixelTopForRow;
