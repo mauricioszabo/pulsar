@@ -44,7 +44,7 @@ const GUTTER_CACHE_SLACK = 200;
 class PulsarTextEditorComponent {
   // --- Static API -----------------------------------------------------------
 
-  static setScheduler(_scheduler) {}
+  static setScheduler(_scheduler) { }
   static getScheduler() { return null; }
 
   static didUpdateStyles() {
@@ -97,6 +97,8 @@ class PulsarTextEditorComponent {
     // layout (avoids forced reflow on every render).
     this._scrollTopValue = 0;
     this._scrollLeftValue = 0;
+    this._pendingScrollTopRow = this.props.initialScrollTopRow;
+    this._pendingScrollLeftColumn = this.props.initialScrollLeftColumn;
 
     // Viewport size (updated by ResizeObserver).
     this._viewportHeight = 0;
@@ -127,6 +129,7 @@ class PulsarTextEditorComponent {
     this._pendingAutoscroll = null;
 
     // Subscriptions.
+    this._intersectionObserver = null;
     this._activeItemSub = null;
     this._tokenizeSub = null;
     this._placeholderSub = null;
@@ -164,7 +167,11 @@ class PulsarTextEditorComponent {
     const { measure, appendFixtureToEl, measureRO } = createMeasurement({
       component: this,
       model: this.props.model,
-      onMeasure: () => { this._scheduleUpdate(); }
+      onMeasure: () => {
+        this._flushPendingLogicalScrollPosition();
+        this._flushPendingAutoscroll();
+        this._scheduleUpdate();
+      }
     });
     this._measure = measure;
     this._measureRO = measureRO;
@@ -242,13 +249,19 @@ class PulsarTextEditorComponent {
 
     // ResizeObserver: keep viewport size current; also re-measure on zoom.
     this._resizeObserver = new ResizeObserver(() => {
-      this._viewportHeight = this._scroller.clientHeight;
-      this._viewportWidth = this._scroller.clientWidth;
-      this._scheduleUpdate();
+      const wasVisible = this.visible;
+      this._syncViewportDimensions();
+      if (this.attached && this.isVisible()) {
+        if (!wasVisible) this.didShow();
+        this._flushPendingLogicalScrollPosition();
+        this._flushPendingAutoscroll();
+        this._scheduleUpdate();
+      } else if (this.attached) {
+        this.didHide();
+      }
     });
     this._resizeObserver.observe(this._scroller);
-    this._viewportHeight = this._scroller.clientHeight;
-    this._viewportWidth = this._scroller.clientWidth;
+    this._syncViewportDimensions();
 
     // Workspace subscription: focus editor when its pane tab becomes active.
     if (global.atom && global.atom.workspace) {
@@ -317,11 +330,8 @@ class PulsarTextEditorComponent {
 
     // Initial measurement attempt.
     const afterMeasure = () => {
-      if (this._pendingAutoscroll) {
-        const pending = this._pendingAutoscroll;
-        this._pendingAutoscroll = null;
-        this.didRequestAutoscroll(pending);
-      }
+      this._flushPendingLogicalScrollPosition();
+      this._flushPendingAutoscroll();
     };
     if (!this._measure()) {
       if (document.fonts && document.fonts.ready) {
@@ -344,6 +354,8 @@ class PulsarTextEditorComponent {
   // --- Scroll handler -------------------------------------------------------
 
   _onScroll() {
+    if (!this.visible || !this.isVisible()) return;
+
     const st = this._scroller.scrollTop;
     const sl = this._scroller.scrollLeft;
     this._scrollTopValue = st;
@@ -365,6 +377,7 @@ class PulsarTextEditorComponent {
   // --- Render loop ----------------------------------------------------------
 
   _scheduleUpdate() {
+    if (!this.visible || !this.isVisible()) return;
     if (this._rafHandle !== null) return;
     this._rafHandle = requestAnimationFrame(() => {
       this._rafHandle = null;
@@ -374,8 +387,11 @@ class PulsarTextEditorComponent {
 
   _render() {
     if (!this._mounted) return;
+    if (!this.visible || !this.isVisible()) return;
     const model = this.props.model;
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
+
+    this._syncViewportDimensions();
 
     const lineHeight = this._lineHeight;
     const charWidth = this._charWidth;
@@ -462,6 +478,8 @@ class PulsarTextEditorComponent {
       lineHeight, charWidth,
       topForRow, totalHeight
     });
+
+    this._applyScrollPositionToDOM();
 
     // Resolve pending update promise so callers to getNextUpdatePromise() unblock.
     if (this.resolveNextUpdatePromise) {
@@ -783,6 +801,69 @@ class PulsarTextEditorComponent {
   scheduleUpdate() { this._scheduleUpdate(); }
   updateSync() { this._render(); }
 
+  _syncViewportDimensions() {
+    if (!this._scroller) return false;
+
+    const height = this._scroller.clientHeight;
+    const width = this._scroller.clientWidth;
+    const changed = height !== this._viewportHeight || width !== this._viewportWidth;
+    this._viewportHeight = height;
+    this._viewportWidth = width;
+    return changed;
+  }
+
+  isVisible() {
+    return this.element.offsetWidth > 0 || this.element.offsetHeight > 0;
+  }
+
+  _applyScrollPositionToDOM() {
+    if (!this._scroller) return;
+
+    if (this._scroller.scrollTop !== this.scrollTop) {
+      this._scroller.scrollTop = this.scrollTop || 0;
+    }
+    if (this._scroller.scrollLeft !== this.scrollLeft) {
+      this._scroller.scrollLeft = this.scrollLeft || 0;
+    }
+    if (this._gutterInnerEl) {
+      this._gutterInnerEl.style.transform =
+        'translateY(' + (-(this.scrollTop || 0)) + 'px)';
+    }
+  }
+
+  _flushPendingLogicalScrollPosition() {
+    let changed = false;
+
+    if (this._pendingScrollTopRow != null && this._lineHeight) {
+      changed = this.setScrollTopRow(this._pendingScrollTopRow, false) || changed;
+      this._pendingScrollTopRow = null;
+    }
+
+    if (this._pendingScrollLeftColumn != null && this._charWidth) {
+      changed = this.setScrollLeftColumn(this._pendingScrollLeftColumn, false) || changed;
+      this._pendingScrollLeftColumn = null;
+    }
+
+    return changed;
+  }
+
+  _flushPendingAutoscroll() {
+    if (!this._pendingAutoscroll) return false;
+    if (
+      !this.visible ||
+      !this._lineHeight ||
+      this._viewportHeight <= 0 ||
+      this._viewportWidth <= 0
+    ) {
+      return false;
+    }
+
+    const pending = this._pendingAutoscroll;
+    this._pendingAutoscroll = null;
+    this.didRequestAutoscroll(pending);
+    return true;
+  }
+
   getNextUpdatePromise() {
     if (!this.nextUpdatePromise) {
       this.nextUpdatePromise = new Promise((resolve) => {
@@ -793,38 +874,43 @@ class PulsarTextEditorComponent {
   }
 
   didAttach() {
+    if (this.attached) return;
+
     this.attached = true;
-    this.visible = true;
-    this.props.model.setVisible(true);
     if (!PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents = new Set();
     }
     PulsarTextEditorComponent.attachedComponents.add(this);
 
-    // Re-apply scroll position (browser resets it on DOM move without firing scroll event).
-    if (this._scroller) {
-      this._scroller.scrollTop = this.scrollTop || 0;
-      this._scroller.scrollLeft = this.scrollLeft || 0;
-      this._scrollTopValue = this._scroller.scrollTop;
-      this._scrollLeftValue = this._scroller.scrollLeft;
-      this._scheduleUpdate();
-      requestAnimationFrame(() => {
-        if (!this._scroller) return;
-        this._scroller.scrollTop = this.scrollTop || 0;
-        this._scroller.scrollLeft = this.scrollLeft || 0;
-        this._scrollTopValue = this._scroller.scrollTop;
-        this._scrollLeftValue = this._scroller.scrollLeft;
-        this._gutterInnerEl.style.transform =
-          'translateY(' + (-this._scroller.scrollTop) + 'px)';
-        this._scheduleUpdate();
+    if (typeof IntersectionObserver !== 'undefined') {
+      this._intersectionObserver = new IntersectionObserver((entries) => {
+        const { intersectionRect } = entries[entries.length - 1];
+        if (intersectionRect.width > 0 || intersectionRect.height > 0) {
+          this.didShow();
+        } else {
+          this.didHide();
+        }
       });
+      this._intersectionObserver.observe(this.element);
+    }
+
+    if (this.isVisible()) {
+      this.didShow();
+    } else {
+      this.didHide();
     }
   }
 
   didDetach() {
+    if (!this.attached) return;
+
+    if (this._intersectionObserver) {
+      this._intersectionObserver.disconnect();
+      this._intersectionObserver = null;
+    }
+
+    this.didHide();
     this.attached = false;
-    this.visible = false;
-    this.props.model.setVisible(false);
     if (PulsarTextEditorComponent.attachedComponents) {
       PulsarTextEditorComponent.attachedComponents.delete(this);
     }
@@ -845,6 +931,7 @@ class PulsarTextEditorComponent {
     if (this._decorationsSub) { this._decorationsSub.dispose(); this._decorationsSub = null; }
     if (this._destroySub) { this._destroySub.dispose(); this._destroySub = null; }
     if (this._grammarSub) { this._grammarSub.dispose(); this._grammarSub = null; }
+    if (this._intersectionObserver) { this._intersectionObserver.disconnect(); this._intersectionObserver = null; }
     if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null; }
     if (this._measureRO) { this._measureRO.disconnect(); }
     this._destroyAllBlockDecorations();
@@ -852,16 +939,32 @@ class PulsarTextEditorComponent {
   }
 
   didShow() {
+    if (!this.isVisible()) return;
+
+    this._syncViewportDimensions();
     this.visible = true;
     this.props.model.setVisible(true);
+    if (!this._lineHeight) this._measure();
+
+    // Re-apply the logical scroll position that we preserved while hidden.
+    this._scrollTopValue = this.scrollTop || 0;
+    this._scrollLeftValue = this.scrollLeft || 0;
+    this._applyScrollPositionToDOM();
+
+    this._flushPendingLogicalScrollPosition();
+    this._flushPendingAutoscroll();
+    this._scheduleUpdate();
   }
 
   didHide() {
+    if (!this.visible) return;
     this.visible = false;
     this.props.model.setVisible(false);
   }
 
   didFocus() {
+    if (!this.visible) this.didShow();
+
     if (!this.focused) {
       this.focused = true;
       this.element.classList.add('is-focused');
@@ -934,7 +1037,14 @@ class PulsarTextEditorComponent {
   // --- Autoscroll -----------------------------------------------------------
 
   didRequestAutoscroll(autoscroll) {
-    if (!autoscroll || !this._scroller || !this._lineHeight) {
+    if (
+      !autoscroll ||
+      !this._scroller ||
+      !this._lineHeight ||
+      !this.visible ||
+      this._viewportHeight <= 0 ||
+      this._viewportWidth <= 0
+    ) {
       this._pendingAutoscroll = autoscroll;
       return;
     }
@@ -949,6 +1059,11 @@ class PulsarTextEditorComponent {
 
   _autoscrollVertically(screenRange, options) {
     const lh = this._lineHeight;
+    if (!this.visible || !lh || this._viewportHeight <= 0) {
+      this._pendingAutoscroll = { screenRange, options };
+      return;
+    }
+
     const sortedBlocks = this._computeSortedBlocks();
     const startPx = this._pixelTopForRow
       ? this._pixelTopForRow(screenRange.start.row)
@@ -957,7 +1072,7 @@ class PulsarTextEditorComponent {
       ? this._pixelBottomForRow(screenRange.end.row)
       : screenRange.end.row * lh + lh;
 
-    const viewH = this._scroller.clientHeight;
+    const viewH = this._viewportHeight;
     const marginLines = Math.min(
       this.props.model && this.props.model.verticalScrollMargin != null
         ? this.props.model.verticalScrollMargin
@@ -984,7 +1099,9 @@ class PulsarTextEditorComponent {
     this._scrollTopValue = targetScrollTop;
     this._scheduleUpdate();
 
-    const maxScrollTop = Math.max(0, this._scroller.scrollHeight - viewH);
+    let blocksTotal = 0;
+    for (const b of sortedBlocks) blocksTotal += b.height;
+    const maxScrollTop = Math.max(0, this.getScrollHeight() + blocksTotal - viewH);
     const clamped = Math.min(targetScrollTop, maxScrollTop);
     this.scrollTop = clamped;
     this._scrollTopValue = clamped;
@@ -994,10 +1111,13 @@ class PulsarTextEditorComponent {
 
   _autoscrollHorizontally(screenRange, options) {
     const cw = this._charWidth;
-    if (!cw || !this._scroller) return;
+    if (!cw || !this._scroller || !this.visible || this._viewportWidth <= 0) {
+      this._pendingAutoscroll = { screenRange, options };
+      return;
+    }
     const startPx = screenRange.start.column * cw;
     const endPx = screenRange.end.column * cw;
-    const viewW = this._scroller.clientWidth;
+    const viewW = this._viewportWidth;
     const marginCols = Math.min(
       this.props.model && this.props.model.horizontalScrollMargin != null
         ? this.props.model.horizontalScrollMargin
@@ -1006,17 +1126,27 @@ class PulsarTextEditorComponent {
     );
     const margin = marginCols * cw;
 
+    const currentScrollLeft = this.scrollLeft;
+    let targetScrollLeft = currentScrollLeft;
     if (!options || options.reversed !== false) {
-      if (endPx + margin > this._scroller.scrollLeft + viewW)
-        this._scroller.scrollLeft = endPx + margin - viewW;
-      if (startPx - margin < this._scroller.scrollLeft)
-        this._scroller.scrollLeft = Math.max(0, startPx - margin);
+      if (endPx + margin > targetScrollLeft + viewW)
+        targetScrollLeft = endPx + margin - viewW;
+      if (startPx - margin < targetScrollLeft)
+        targetScrollLeft = Math.max(0, startPx - margin);
     } else {
-      if (startPx - margin < this._scroller.scrollLeft)
-        this._scroller.scrollLeft = Math.max(0, startPx - margin);
-      if (endPx + margin > this._scroller.scrollLeft + viewW)
-        this._scroller.scrollLeft = endPx + margin - viewW;
+      if (startPx - margin < targetScrollLeft)
+        targetScrollLeft = Math.max(0, startPx - margin);
+      if (endPx + margin > targetScrollLeft + viewW)
+        targetScrollLeft = endPx + margin - viewW;
     }
+
+    const clamped = Math.max(0, Math.min(targetScrollLeft, this.getMaxScrollLeft()));
+    if (clamped === currentScrollLeft) return;
+
+    this.scrollLeft = clamped;
+    this._scrollLeftValue = clamped;
+    this._scroller.scrollLeft = clamped;
+    this._scheduleUpdate();
   }
 
   // --- Block decorations ----------------------------------------------------
@@ -1309,24 +1439,35 @@ class PulsarTextEditorComponent {
 
   // --- Scroll ---------------------------------------------------------------
 
-  getScrollTop() { return this._scroller ? this._scroller.scrollTop : this.scrollTop; }
-  setScrollTop(top) {
-    const v = Math.max(0, top || 0);
+  getScrollTop() { return this.scrollTop; }
+  setScrollTop(top, scheduleUpdate = true) {
+    if (Number.isNaN(top) || top == null) return false;
+
+    const v = Math.max(0, Math.min(this.getMaxScrollTop(), top || 0));
+    const changed = v !== this.scrollTop;
     this.scrollTop = v;
     this._scrollTopValue = v;
     if (this._scroller) this._scroller.scrollTop = v;
-    this._scheduleUpdate();
-    return v;
+    if (this._gutterInnerEl) {
+      this._gutterInnerEl.style.transform = 'translateY(' + (-v) + 'px)';
+    }
+    if (changed) this.element.emitter.emit('did-change-scroll-top', v);
+    if (changed && scheduleUpdate) this._scheduleUpdate();
+    return changed;
   }
 
-  getScrollLeft() { return this._scroller ? this._scroller.scrollLeft : this.scrollLeft; }
-  setScrollLeft(left) {
-    const v = Math.max(0, left || 0);
+  getScrollLeft() { return this.scrollLeft; }
+  setScrollLeft(left, scheduleUpdate = true) {
+    if (Number.isNaN(left) || left == null) return false;
+
+    const v = Math.max(0, Math.min(this.getMaxScrollLeft(), left || 0));
+    const changed = v !== this.scrollLeft;
     this.scrollLeft = v;
     this._scrollLeftValue = v;
     if (this._scroller) this._scroller.scrollLeft = v;
-    this._scheduleUpdate();
-    return v;
+    if (changed) this.element.emitter.emit('did-change-scroll-left', v);
+    if (changed && scheduleUpdate) this._scheduleUpdate();
+    return changed;
   }
 
   getScrollBottom() { return this.getScrollTop() + this.getClientContainerHeight(); }
@@ -1347,19 +1488,34 @@ class PulsarTextEditorComponent {
   }
 
   getScrollTopRow() {
-    return this._lineHeight ? Math.floor(this.getScrollTop() / this._lineHeight) : 0;
+    if (this._lineHeight) return Math.floor(this.getScrollTop() / this._lineHeight);
+    return this._pendingScrollTopRow || 0;
   }
 
-  setScrollTopRow(row) {
-    if (this._lineHeight) this.setScrollTop(row * this._lineHeight);
+  setScrollTopRow(row, scheduleUpdate = true) {
+    if (!this._lineHeight) {
+      this._pendingScrollTopRow = row;
+      return false;
+    }
+
+    return this.setScrollTop(
+      pixelTopForRow(row, this._lineHeight, this._computeSortedBlocks()),
+      scheduleUpdate
+    );
   }
 
   getScrollLeftColumn() {
-    return this._charWidth ? Math.floor(this.getScrollLeft() / this._charWidth) : 0;
+    if (this._charWidth) return Math.floor(this.getScrollLeft() / this._charWidth);
+    return this._pendingScrollLeftColumn || 0;
   }
 
-  setScrollLeftColumn(column) {
-    if (this._charWidth) this.setScrollLeft(column * this._charWidth);
+  setScrollLeftColumn(column, scheduleUpdate = true) {
+    if (!this._charWidth) {
+      this._pendingScrollLeftColumn = column;
+      return false;
+    }
+
+    return this.setScrollLeft(column * this._charWidth, scheduleUpdate);
   }
 
   // --- Viewport -------------------------------------------------------------
@@ -1397,3 +1553,5 @@ class PulsarTextEditorComponent {
 PulsarTextEditorComponent.attachedComponents = null;
 
 module.exports = PulsarTextEditorComponent;
+
+// PulsarTextEditorComponent.setScheduler
