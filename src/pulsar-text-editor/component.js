@@ -1636,5 +1636,3 @@ class PulsarTextEditorComponent {
 PulsarTextEditorComponent.attachedComponents = null;
 
 module.exports = PulsarTextEditorComponent;
-
-// PulsarTextEditorComponent.setScheduler
