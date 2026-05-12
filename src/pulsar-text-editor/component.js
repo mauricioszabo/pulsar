@@ -11,6 +11,8 @@ const GutterView = require('./gutter-view');
 const DecorationsView = require('./decorations-view');
 const { createMeasurement } = require('./measurements');
 const { applyLineDecoration } = require('./html-builders');
+const electron = require('electron');
+const clipboard = electron.clipboard;
 const {
   computeFirstRenderedRow,
   computeLastRenderedRow,
@@ -136,6 +138,8 @@ class PulsarTextEditorComponent {
     this._decorationsSub = null;
     this._destroySub = null;
     this._grammarSub = null;
+    this._selectionClipboardImmediateId = null;
+    this._pendingSelectionClipboardText = null;
 
     this.nextUpdatePromise = null;
     this.resolveNextUpdatePromise = null;
@@ -151,6 +155,7 @@ class PulsarTextEditorComponent {
       'position: absolute; width: 1px; height: 1px; opacity: 0; ' +
       'padding: 0; border: 0; pointer-events: none; z-index: 5;';
     this.hiddenInput.addEventListener('input', this._onHiddenInputInput.bind(this));
+    this.hiddenInput.addEventListener('paste', this._onHiddenInputPaste.bind(this));
     this.hiddenInput.addEventListener('focus', this._onHiddenInputFocus.bind(this));
     this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
     this.element.appendChild(this.hiddenInput);
@@ -264,19 +269,11 @@ class PulsarTextEditorComponent {
     this._syncViewportDimensions();
 
     // Workspace subscription: focus editor when its pane tab becomes active.
-    if (global.atom && global.atom.workspace) {
-      this._activeItemSub = global.atom.workspace.onDidChangeActivePaneItem(
-        (item) => {
-          if (
-            item === this.props.model &&
-            this.attached &&
-            document.activeElement !== this.hiddenInput
-          ) {
-            this.element.focus({ preventScroll: true });
-          }
-        }
-      );
-    }
+    this._activeItemSub = global.atom.workspace.onDidChangeActivePaneItem( (item) => {
+      if ( item === this.attached && document.activeElement !== this.hiddenInput ) {
+        this.element.focus({ preventScroll: true });
+      }
+    });
 
     // TextMate tokenizes asynchronously. Display-layer highlighting changes
     // invalidate affected screen-line objects; this final event only needs a
@@ -321,7 +318,7 @@ class PulsarTextEditorComponent {
     }
 
     // Mini attribute.
-    if (this.props.model.isMini && this.props.model.isMini()) {
+    if (this.props.model.isMini()) {
       this.element.setAttribute('mini', '');
       this.element.classList.add('mini');
     }
@@ -334,9 +331,7 @@ class PulsarTextEditorComponent {
       this._flushPendingAutoscroll();
     };
     if (!this._measure()) {
-      if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(() => { this._measure(); afterMeasure(); });
-      }
+      document.fonts.ready.then(() => { this._measure(); afterMeasure(); });
       requestAnimationFrame(() => {
         if (!this._lineHeight) this._measure();
         afterMeasure();
@@ -386,12 +381,11 @@ class PulsarTextEditorComponent {
   }
 
   _render() {
-    if (!this._mounted) return;
-    if (!this.visible || !this.isVisible()) return;
-    const model = this.props.model;
-    if (!model || (model.isDestroyed && model.isDestroyed())) return;
+    const model = this.props.model
+    if (!this._mounted || !this.isVisible() || model.isDestroyed()) return;
 
     this._syncViewportDimensions();
+    this._flushPendingAutoscroll();
 
     const lineHeight = this._lineHeight;
     const charWidth = this._charWidth;
@@ -429,10 +423,10 @@ class PulsarTextEditorComponent {
     const longestLineWidth = this._computeLongestLineWidth(model, charWidth);
 
     // Gutter state.
-    const showGutter = model.isMini && model.isMini()
+    const showGutter = model.isMini()
       ? false
-      : (model.anyLineNumberGutterVisible ? model.anyLineNumberGutterVisible() : true);
-    const showLineNumbers = model.doesShowLineNumbers ? model.doesShowLineNumbers() : true;
+      : model.anyLineNumberGutterVisible();
+    const showLineNumbers = model.doesShowLineNumbers();
     const maxDigits = Math.max(2, String(model.getLineCount()).length);
 
     // Decoration maps.
@@ -441,14 +435,20 @@ class PulsarTextEditorComponent {
     // Visible gutter rows (with cache).
     const visibleGutterRows = this._computeVisibleGutterRows(firstRow, lastRow, model, totalRows);
 
+    // Selection ranges.
+    const selections = model.getSelections();
+    const hasSelection = selections.some((s) => !s.isEmpty());
+    this.element.classList.toggle('has-selection', hasSelection);
+    const selectionRanges = selections.map((s) => s.getScreenRange());
+
     // Cursor descriptors (position + merged cursor-decoration class/style).
     const cursorDescriptors = this._computeCursorDescriptors(model);
 
     // Set of screen rows that have a cursor (for cursor-line class on lines).
-    const cursorRows = this._computeCursorRows(cursorDescriptors, lineHeight);
-
-    // Selection ranges.
-    const selectionRanges = model.getSelections().map((s) => s.getScreenRange());
+    const showCursorLine = !model.isMini() && !hasSelection;
+    const cursorRows = showCursorLine
+      ? this._computeCursorRows(cursorDescriptors, lineHeight)
+      : new Set();
 
     // Highlight decorations (find-results, bracket-matcher, linter, etc.).
     const highlightDecos = this._computeHighlightDecos(model, firstRow, lastRow);
@@ -539,7 +539,7 @@ class PulsarTextEditorComponent {
   }
 
   _computeVisibleGutterRows(firstRow, lastRow, model, totalRows) {
-    if (!model || (model.isDestroyed && model.isDestroyed())) return [];
+    if (model.isDestroyed()) return [];
     const count = lastRow - firstRow + 1;
     if (count <= 0) return [];
 
@@ -584,12 +584,12 @@ class PulsarTextEditorComponent {
   }
 
   _computeCursorDescriptors(model) {
-    if (!model || (model.isDestroyed && model.isDestroyed())) return [];
+    if (model.isDestroyed()) return [];
     const cursors = model.getCursors();
     if (cursors.length === 0) return [];
 
     let propsByMarker = null;
-    if (model.decorationManager && model.decorationManager.decorationPropertiesByMarkerForScreenRowRange) {
+    if (model.decorationManager.decorationPropertiesByMarkerForScreenRowRange) {
       const total = model.getScreenLineCount();
       propsByMarker = model.decorationManager.decorationPropertiesByMarkerForScreenRowRange(0, total);
     }
@@ -670,10 +670,19 @@ class PulsarTextEditorComponent {
   // --- Hidden input handlers ------------------------------------------------
 
   _onHiddenInputInput(event) {
-    if (!this.inputEnabled) return;
-    const text = event.data;
-    if (text != null && text.length > 0) this.props.model.insertText(text);
-    this.hiddenInput.value = '';
+    try {
+      if (!this._isInputEnabled()) return;
+      const text = event.data;
+      if (text != null && text.length > 0) this.props.model.insertText(text);
+    } finally {
+      this.hiddenInput.value = '';
+    }
+  }
+
+  _onHiddenInputPaste(event) {
+    // Chromium converts Linux middle-click paste into a paste/input event.
+    // The editor handles primary-selection paste from mousedown instead.
+    if (this.getPlatform() === 'linux') event.preventDefault();
   }
 
   _onHiddenInputFocus() {
@@ -696,7 +705,7 @@ class PulsarTextEditorComponent {
   // --- Mouse handling -------------------------------------------------------
 
   _onMouseDown(event) {
-    if (event.button !== 0) return;
+    if (event.button !== 0 && event.button !== 1) return;
 
     if (document.activeElement !== this.hiddenInput) {
       this.element.focus({ preventScroll: true });
@@ -709,6 +718,7 @@ class PulsarTextEditorComponent {
 
     // Gutter fold toggle: clicking the chevron on a foldable row.
     if (
+      event.button === 0 &&
       target &&
       target.matches('.icon-right') &&
       target.parentElement &&
@@ -738,8 +748,20 @@ class PulsarTextEditorComponent {
     // normally so links and interactive elements inside blocks work.
     if (target && target.closest('.block-decoration')) return;
 
-    event.preventDefault();
+    if (event.preventDefault) event.preventDefault();
     const screenPosition = this._screenPositionForMouse(event);
+
+    if (event.button === 1) {
+      model.setCursorScreenPosition(screenPosition, { autoscroll: false });
+      if (
+        this.getPlatform() === 'linux' &&
+        this._isInputEnabled() &&
+        global.atom.config.get('editor.selectionClipboard')
+      ) {
+        model.insertText(clipboard.readText('selection'));
+      }
+      return;
+    }
 
     if (target && target.matches('.fold-marker')) {
       const bufferPosition = model.bufferPositionForScreenPosition(screenPosition);
@@ -860,8 +882,7 @@ class PulsarTextEditorComponent {
 
     const pending = this._pendingAutoscroll;
     this._pendingAutoscroll = null;
-    this.didRequestAutoscroll(pending);
-    return true;
+    return this._applyAutoscroll(pending);
   }
 
   getNextUpdatePromise() {
@@ -934,6 +955,11 @@ class PulsarTextEditorComponent {
     if (this._intersectionObserver) { this._intersectionObserver.disconnect(); this._intersectionObserver = null; }
     if (this._resizeObserver) { this._resizeObserver.disconnect(); this._resizeObserver = null; }
     if (this._measureRO) { this._measureRO.disconnect(); }
+    if (this._selectionClipboardImmediateId) {
+      clearImmediate(this._selectionClipboardImmediateId);
+      this._selectionClipboardImmediateId = null;
+    }
+    this._pendingSelectionClipboardText = null;
     this._destroyAllBlockDecorations();
     this._destroyAllOverlays();
   }
@@ -984,7 +1010,7 @@ class PulsarTextEditorComponent {
   }
 
   _updateGrammarDataset() {
-    const grammar = this.props.model.getGrammar && this.props.model.getGrammar();
+    const grammar = this.props.model.getGrammar();
     if (grammar && grammar.scopeName) {
       this.element.dataset.grammar = grammar.scopeName.replace(/\./g, ' ');
     } else {
@@ -1012,11 +1038,45 @@ class PulsarTextEditorComponent {
   didChangeSelectionRange() {
     this._scheduleUpdate();
     this._restartBlink();
+    this._writeSelectionClipboard();
   }
 
   didUpdateSelections() {
     this._scheduleUpdate();
     this._restartBlink();
+    this._writeSelectionClipboard();
+  }
+
+  _writeSelectionClipboard() {
+    if (this.getPlatform() !== 'linux') return;
+
+    const model = this.props.model;
+    if (model.isDestroyed()) return;
+
+    const selectedText = model.getSelectedText();
+    if (!selectedText) return;
+    if (selectedText === this._pendingSelectionClipboardText) return;
+
+    if (this._selectionClipboardImmediateId) {
+      clearImmediate(this._selectionClipboardImmediateId);
+    }
+
+    this._pendingSelectionClipboardText = selectedText;
+    this._selectionClipboardImmediateId = setImmediate(() => {
+      this._selectionClipboardImmediateId = null;
+      this._pendingSelectionClipboardText = null;
+
+      const model = this.props.model;
+      if (model.isDestroyed()) return;
+
+      const selectedText = model.getSelectedText();
+      if (!selectedText) return;
+
+      electron.ipcRenderer.send(
+        'write-text-to-selection-clipboard',
+        selectedText
+      );
+    });
   }
 
   // --- Blinking -------------------------------------------------------------
@@ -1037,8 +1097,16 @@ class PulsarTextEditorComponent {
   // --- Autoscroll -----------------------------------------------------------
 
   didRequestAutoscroll(autoscroll) {
+    if (!autoscroll) return;
+    this._pendingAutoscroll = autoscroll;
+    this._scheduleUpdate();
+  }
+
+  _applyAutoscroll(autoscroll) {
+    if (!autoscroll) return false;
+    const { screenRange, options } = autoscroll;
+    if (!screenRange) return false;
     if (
-      !autoscroll ||
       !this._scroller ||
       !this._lineHeight ||
       !this.visible ||
@@ -1046,15 +1114,15 @@ class PulsarTextEditorComponent {
       this._viewportWidth <= 0
     ) {
       this._pendingAutoscroll = autoscroll;
-      return;
+      return false;
     }
-    const { screenRange, options } = autoscroll;
-    if (!screenRange) return;
+
     this._lastAutoscroll = { screenRange, options };
     if (this._lastAutoscrollTimer) clearTimeout(this._lastAutoscrollTimer);
     this._lastAutoscrollTimer = setTimeout(() => { this._lastAutoscroll = null; }, 500);
     this._autoscrollVertically(screenRange, options);
     this._autoscrollHorizontally(screenRange, options);
+    return true;
   }
 
   _autoscrollVertically(screenRange, options) {
@@ -1074,7 +1142,7 @@ class PulsarTextEditorComponent {
 
     const viewH = this._viewportHeight;
     const marginLines = Math.min(
-      this.props.model && this.props.model.verticalScrollMargin != null
+      this.props.model.verticalScrollMargin != null
         ? this.props.model.verticalScrollMargin
         : DEFAULT_VERTICAL_SCROLL_MARGIN,
       Math.max(0, Math.floor((viewH / lh - 1) / 2))
@@ -1119,7 +1187,7 @@ class PulsarTextEditorComponent {
     const endPx = screenRange.end.column * cw;
     const viewW = this._viewportWidth;
     const marginCols = Math.min(
-      this.props.model && this.props.model.horizontalScrollMargin != null
+      this.props.model.horizontalScrollMargin != null
         ? this.props.model.horizontalScrollMargin
         : DEFAULT_HORIZONTAL_SCROLL_MARGIN,
       Math.max(0, Math.floor((viewW / cw - 1) / 2))
@@ -1298,7 +1366,7 @@ class PulsarTextEditorComponent {
     }
 
     let markerSub = null;
-    const marker = decoration.getMarker ? decoration.getMarker() : null;
+    const marker = decoration.getMarker();
     if (marker && marker.onDidChange) {
       markerSub = marker.onDidChange(() => this._positionOverlay(decoration));
     }
@@ -1394,8 +1462,8 @@ class PulsarTextEditorComponent {
 
   pixelRangeForScreenRange(range) {
     return {
-      start: this.pixelPositionForScreenPosition(range && range.start),
-      end: this.pixelPositionForScreenPosition(range && range.end)
+      start: this.pixelPositionForScreenPosition(range.start),
+      end: this.pixelPositionForScreenPosition(range.end)
     };
   }
 
@@ -1538,8 +1606,23 @@ class PulsarTextEditorComponent {
 
   // --- Input ----------------------------------------------------------------
 
-  setInputEnabled(enabled) { this.inputEnabled = enabled !== false; }
+  setInputEnabled(enabled) {
+    this.inputEnabled = enabled !== false;
+    if (this.hiddenInput) this.hiddenInput.value = '';
+    if (this.props.model.update) {
+      this.props.model.update({ keyboardInputEnabled: this.inputEnabled });
+    }
+  }
   getHiddenInput() { return this.hiddenInput; }
+
+  _isInputEnabled() {
+    const model = this.props.model;
+    return ( this.inputEnabled && !model.isReadOnly() && model.isKeyboardInputEnabled() );
+  }
+
+  getPlatform() {
+    return this.props.platform || process.platform;
+  }
 
   // --- Decoration / gutter queries ------------------------------------------
 
