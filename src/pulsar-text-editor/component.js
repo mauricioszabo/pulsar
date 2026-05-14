@@ -385,6 +385,7 @@ class PulsarTextEditorComponent {
     if (!this._mounted || !this.isVisible() || model.isDestroyed()) return;
 
     this._syncViewportDimensions();
+    this.updateModelSoftWrapColumn();
     this._flushPendingAutoscroll();
 
     const lineHeight = this._lineHeight;
@@ -420,7 +421,9 @@ class PulsarTextEditorComponent {
     const totalHeight = totalRows * (lineHeight || 0) + blocksTotal;
 
     // Longest line width for horizontal scroll range.
-    const longestLineWidth = this._computeLongestLineWidth(model, charWidth);
+    const longestLineWidth = model.isSoftWrapped()
+      ? viewportWidth
+      : this._computeLongestLineWidth(model, charWidth);
 
     // Gutter state.
     const showGutter = model.isMini()
@@ -481,8 +484,15 @@ class PulsarTextEditorComponent {
 
     this._applyScrollPositionToDOM();
 
+    let needsFollowupRender = false;
+    if (model.isSoftWrapped()) {
+      needsFollowupRender = this._syncViewportDimensions();
+      if (this.updateModelSoftWrapColumn()) needsFollowupRender = true;
+      if (needsFollowupRender) this._scheduleUpdate();
+    }
+
     // Resolve pending update promise so callers to getNextUpdatePromise() unblock.
-    if (this.resolveNextUpdatePromise) {
+    if (this.resolveNextUpdatePromise && !needsFollowupRender) {
       this.resolveNextUpdatePromise();
       this.nextUpdatePromise = null;
       this.resolveNextUpdatePromise = null;
@@ -832,6 +842,20 @@ class PulsarTextEditorComponent {
     this._viewportHeight = height;
     this._viewportWidth = width;
     return changed;
+  }
+
+  updateModelSoftWrapColumn() {
+    const model = this.props.model;
+    if (!model || !this._charWidth) return false;
+    if (model.width != null) return false;
+
+    const editorWidthInChars = this.getScrollContainerClientWidthInBaseCharacters();
+    if (editorWidthInChars > 0 && editorWidthInChars !== model.getEditorWidthInChars()) {
+      model.setEditorWidthInChars(editorWidthInChars);
+      return true;
+    }
+
+    return false;
   }
 
   isVisible() {
@@ -1468,7 +1492,12 @@ class PulsarTextEditorComponent {
   }
 
   renderedScreenLineForRow(_row) { return null; }
-  measureDimensions() {}
+  measureDimensions() {
+    const measured = this._measure ? this._measure() : false;
+    this._syncViewportDimensions();
+    const wrapColumnChanged = this.updateModelSoftWrapColumn();
+    return measured || wrapColumnChanged;
+  }
 
   // --- Dimensions -----------------------------------------------------------
 
@@ -1499,7 +1528,14 @@ class PulsarTextEditorComponent {
 
   getScrollContainerHeight() { return this.getClientContainerHeight(); }
   getScrollContainerWidth() { return this.getClientContainerWidth(); }
+  getScrollContainerClientWidth() { return this.getClientContainerWidth(); }
   getScrollContainerClientHeight() { return this.getClientContainerHeight(); }
+
+  getScrollContainerClientWidthInBaseCharacters() {
+    const charWidth = this.getBaseCharacterWidth();
+    if (!charWidth) return 0;
+    return Math.floor(this.getScrollContainerClientWidth() / charWidth);
+  }
 
   getVerticalScrollbarWidth() { return 0; }
   getHorizontalScrollbarHeight() { return 0; }
@@ -1545,7 +1581,13 @@ class PulsarTextEditorComponent {
   setScrollRight(right) { return this.setScrollLeft(right - this.getClientContainerWidth()); }
 
   getScrollHeight() { return this.getContentHeight(); }
-  getScrollWidth() { return this.getContentWidth(); }
+  getScrollWidth() {
+    const model = this.props.model;
+    const clientWidth = this.getScrollContainerClientWidth();
+    if (model.isSoftWrapped && model.isSoftWrapped()) return clientWidth;
+    if (model.getAutoWidth && model.getAutoWidth()) return this.getContentWidth();
+    return Math.max(this.getContentWidth(), clientWidth);
+  }
 
   getMaxScrollTop() {
     return Math.max(0, this.getScrollHeight() - this.getClientContainerHeight());
