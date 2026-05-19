@@ -11,8 +11,9 @@ const LINE_CACHE_SLACK = 200;
 // The highlights and cursors overlay divs are created externally (by the
 // component) and appended after bottomSpacer; this class does not touch them.
 class LinesView {
-  constructor(linesWrapper) {
+  constructor(linesWrapper, options = {}) {
     this._linesWrapper = linesWrapper;
+    this._onBlockDecorationResize = options.onBlockDecorationResize;
 
     // Spacers are always present as fixed reference points.
     this._topSpacerEl = document.createElement('div');
@@ -28,6 +29,17 @@ class LinesView {
     // Keyed DOM nodes.
     this._lineEls = new Map();   // screenRow → HTMLElement
     this._blockEls = new Map();  // blockInfo → HTMLElement
+    this._blockInfosByEl = new Map(); // HTMLElement → blockInfo
+    this._blockResizeObserver = null;
+
+    if (typeof ResizeObserver !== 'undefined' && this._onBlockDecorationResize) {
+      this._blockResizeObserver = new ResizeObserver(entries => {
+        for (const entry of entries) {
+          const info = this._blockInfosByEl.get(entry.target);
+          if (info) this._onBlockDecorationResize(info);
+        }
+      });
+    }
 
     // Line wrapper cache: same structure as Solid's lineCache — avoids
     // rebuilding the screenLine object on every tokenization tick.
@@ -122,7 +134,7 @@ class LinesView {
       for (const b of this._blocksAtRow(item.row, 'after', sortedBlocks)) usedBlocks.add(b);
     }
     for (const info of this._blockEls.keys()) {
-      if (!usedBlocks.has(info)) this._blockEls.delete(info);
+      if (!usedBlocks.has(info)) this._removeBlockEl(info);
     }
 
     this._reconcile(newEls);
@@ -155,7 +167,10 @@ class LinesView {
       el = document.createElement('div');
       el.className = 'block-decoration';
       this._blockEls.set(blockInfo, el);
+      this._blockInfosByEl.set(el, blockInfo);
+      if (this._blockResizeObserver) this._blockResizeObserver.observe(el);
     }
+    blockInfo.wrapperElement = el;
     // Re-attach the item element if it moved (appendChild of already-attached
     // node moves it from its previous parent — intentional same as Solid).
     const item = blockInfo.element;
@@ -163,6 +178,15 @@ class LinesView {
       el.appendChild(item);
     }
     return el;
+  }
+
+  _removeBlockEl(blockInfo) {
+    const el = this._blockEls.get(blockInfo);
+    if (!el) return;
+    if (this._blockResizeObserver) this._blockResizeObserver.unobserve(el);
+    this._blockInfosByEl.delete(el);
+    this._blockEls.delete(blockInfo);
+    if (blockInfo.wrapperElement === el) blockInfo.wrapperElement = null;
   }
 
   _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows }) {

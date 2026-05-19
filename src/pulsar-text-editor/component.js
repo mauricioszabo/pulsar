@@ -116,7 +116,7 @@ class PulsarTextEditorComponent {
     this._mounted = false;
 
     // Block decorations: Map<decoration, blockInfo>.
-    // blockInfo: { decoration, element, row, position, order, height, ro, markerSub, destroySub }
+    // blockInfo: { decoration, element, wrapperElement, row, position, order, height, ro, markerSub, destroySub }
     this._blockDecorations = new Map();
 
     // Overlay decorations: Map<decoration, { wrapperEl, resizeObserver, destroySub, markerSub }>.
@@ -208,7 +208,9 @@ class PulsarTextEditorComponent {
     this._scroller.appendChild(this._linesWrapper);
 
     // Lines view manages topSpacer + lines + bottomSpacer inside linesWrapper.
-    this._linesView = new LinesView(this._linesWrapper);
+    this._linesView = new LinesView(this._linesWrapper, {
+      onBlockDecorationResize: (info) => this._didResizeRenderedBlockDecoration(info)
+    });
 
     // Highlights layer (selections + highlight decorations). z-index:-1 so it
     // paints behind line text within the linesWrapper stacking context.
@@ -413,12 +415,12 @@ class PulsarTextEditorComponent {
     const lastRow = computeLastRenderedRow(scrollTop, viewportHeight, lineHeight, totalRows, sortedBlocks);
     const visColRange = computeVisibleColumnRange(scrollLeft, viewportWidth, charWidth);
     const topSpacer = computeTopSpacer(firstRow, lineHeight, sortedBlocks);
-    const bottomSpacer = computeBottomSpacer(lastRow, totalRows, lineHeight, sortedBlocks);
+    let bottomSpacer = computeBottomSpacer(lastRow, totalRows, lineHeight, sortedBlocks);
 
     // Total content height (for overlay layer heights).
     let blocksTotal = 0;
     for (const b of sortedBlocks) blocksTotal += b.height;
-    const totalHeight = totalRows * (lineHeight || 0) + blocksTotal;
+    let totalHeight = totalRows * (lineHeight || 0) + blocksTotal;
 
     // Longest line width for horizontal scroll range.
     const longestLineWidth = model.isSoftWrapped()
@@ -466,6 +468,13 @@ class PulsarTextEditorComponent {
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
     });
+
+    if (this._syncRenderedBlockDecorationHeights()) {
+      blocksTotal = 0;
+      for (const b of sortedBlocks) blocksTotal += b.height;
+      totalHeight = totalRows * (lineHeight || 0) + blocksTotal;
+      bottomSpacer = computeBottomSpacer(lastRow, totalRows, lineHeight, sortedBlocks);
+    }
 
     this._gutterView.update({
       showGutter, showLineNumbers, maxDigits,
@@ -1247,7 +1256,82 @@ class PulsarTextEditorComponent {
     this._addBlockDecoration(decoration);
   }
 
-  invalidateBlockDecorationDimensions(_decoration) {}
+  invalidateBlockDecorationDimensions(decoration) {
+    const info = this._blockDecorations.get(decoration);
+    if (!info) return;
+    if (this._updateBlockDecorationHeight(info)) {
+      this._scheduleUpdate();
+      this._replayLastAutoscroll();
+    }
+  }
+
+  _didResizeRenderedBlockDecoration(info) {
+    if (!info || !this._blockDecorations.has(info.decoration)) return;
+    if (this._updateBlockDecorationHeight(info)) {
+      this._scheduleUpdate();
+      this._replayLastAutoscroll();
+    }
+  }
+
+  _syncRenderedBlockDecorationHeights() {
+    let changed = false;
+    for (const info of this._blockDecorations.values()) {
+      const wrapper = info.wrapperElement;
+      if (!wrapper || !this._isNodeConnected(wrapper)) continue;
+      if (this._updateBlockDecorationHeight(info)) changed = true;
+    }
+    if (changed) {
+      this._scheduleUpdate();
+      this._replayLastAutoscroll();
+    }
+    return changed;
+  }
+
+  _updateBlockDecorationHeight(info) {
+    const newHeight = this._measureBlockDecorationHeight(info);
+    if (Math.abs((info.height || 0) - newHeight) <= 0.5) return false;
+    info.height = newHeight;
+    return true;
+  }
+
+  _measureBlockDecorationHeight(info) {
+    const wrapper = info.wrapperElement;
+    const target = wrapper && this._isNodeConnected(wrapper)
+      ? wrapper
+      : info.element;
+    if (!target) return 0;
+
+    if (target.parentNode && this._isNodeConnected(target)) {
+      const before = document.createElement('div');
+      const after = document.createElement('div');
+      const sentinelStyle =
+        'display: block; height: 1px; margin: 0; padding: 0; border: 0; overflow: hidden;';
+      before.style.cssText = sentinelStyle;
+      after.style.cssText = sentinelStyle;
+      target.parentNode.insertBefore(before, target);
+      target.parentNode.insertBefore(after, target.nextSibling);
+      const height = after.getBoundingClientRect().top -
+        before.getBoundingClientRect().bottom;
+      before.remove();
+      after.remove();
+      return Math.max(0, height);
+    }
+
+    return target.offsetHeight || 0;
+  }
+
+  _isNodeConnected(node) {
+    if (!node) return false;
+    if (node.isConnected != null) return node.isConnected;
+    return document.documentElement.contains(node);
+  }
+
+  _replayLastAutoscroll() {
+    if (!this._lastAutoscroll) return;
+    const { screenRange, options } = this._lastAutoscroll;
+    this._autoscrollVertically(screenRange, options);
+    this._autoscrollHorizontally(screenRange, options);
+  }
 
   _addBlockDecoration(decoration) {
     if (this._blockDecorations.has(decoration)) return;
@@ -1270,15 +1354,9 @@ class PulsarTextEditorComponent {
     const ro = new ResizeObserver(() => {
       const info = this._blockDecorations.get(decoration);
       if (!info) return;
-      const newHeight = element.offsetHeight || 0;
-      if (info.height !== newHeight) {
-        info.height = newHeight;
+      if (this._updateBlockDecorationHeight(info)) {
         this._scheduleUpdate();
-        if (this._lastAutoscroll) {
-          const { screenRange, options } = this._lastAutoscroll;
-          this._autoscrollVertically(screenRange, options);
-          this._autoscrollHorizontally(screenRange, options);
-        }
+        this._replayLastAutoscroll();
       }
     });
     ro.observe(element);
@@ -1303,11 +1381,14 @@ class PulsarTextEditorComponent {
       });
     }
 
-    this._blockDecorations.set(decoration, {
+    const info = {
       decoration, element, row, position, order,
-      height: element.offsetHeight || 0,
-      ro, markerSub, destroySub
-    });
+      height: 0,
+      ro, markerSub, destroySub,
+      wrapperElement: null
+    };
+    info.height = this._measureBlockDecorationHeight(info);
+    this._blockDecorations.set(decoration, info);
     this._scheduleUpdate();
   }
 
@@ -1317,6 +1398,7 @@ class PulsarTextEditorComponent {
     info.ro.disconnect();
     if (info.markerSub) info.markerSub.dispose();
     if (info.destroySub) info.destroySub.dispose();
+    info.wrapperElement = null;
     this._blockDecorations.delete(decoration);
     this._scheduleUpdate();
   }
