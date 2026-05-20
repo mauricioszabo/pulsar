@@ -91,13 +91,14 @@ module.exports = class CodeEditorRegistry {
   }
 
   // Returns the code editor whose element currently contains DOM focus, or null.
-  // Computed directly from document.activeElement — no cached state.
   getActiveEditor() {
-    for (const editor of this.activeEditors) {
-      const el = editor.getElement();
-      if (el === document.activeElement || el.contains(document.activeElement)) {
-        return editor;
+    let el = document.activeElement;
+    while (el) {
+      if (el.tagName === 'ATOM-TEXT-EDITOR') {
+        const model = el.getModel();
+        return this.activeEditors.has(model) ? model : null;
       }
+      el = el.parentElement;
     }
     return null;
   }

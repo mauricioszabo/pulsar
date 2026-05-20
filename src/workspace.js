@@ -1776,11 +1776,11 @@ module.exports = class Workspace extends Model {
   // Returns a {TextEditor} or `undefined` if the workspace center's current
   // active item is not a {TextEditor}.
   getActiveTextEditor() {
-    return (
-      this.codeEditorRegistry.getActiveEditor() ||
-      this.textEditorRegistry.getActiveTextEditor() ||
-      undefined
-    );
+    let el = document.activeElement;
+    while (el) {
+      if (el.tagName === 'ATOM-TEXT-EDITOR') return el.getModel();
+      el = el.parentElement;
+    }
   }
 
   // Save all pane items.
