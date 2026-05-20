@@ -103,11 +103,6 @@ module.exports = class CodeEditorRegistry {
     return null;
   }
 
-  // Returns all editors currently attached to the DOM.
-  getActiveEditors() {
-    return Array.from(this.activeEditors);
-  }
-
   // Invoke callback for each currently-attached editor and for all future
   // editors when they attach. Returns a {Disposable}.
   observe(callback) {

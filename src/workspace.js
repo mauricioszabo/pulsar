@@ -1767,7 +1767,7 @@ module.exports = class Workspace extends Model {
   getTextEditors() {
     return [
       ...this.textEditorRegistry.editors,
-      ...this.codeEditorRegistry.getActiveEditors()
+      ...this.codeEditorRegistry.editors
     ];
   }
 
