@@ -17,6 +17,7 @@ const PanelContainer = require('./panel-container');
 const Task = require('./task');
 const WorkspaceCenter = require('./workspace-center');
 const { createWorkspaceElement } = require('./workspace-element');
+const CodeEditorRegistry = require('./code-editor-registry');
 
 // Given a single glob pattern matcher, test it against a relativized path
 // within the project. Even if this path itself doesn't match the glob, it's
@@ -334,6 +335,7 @@ module.exports = class Workspace extends Model {
     this.destroyedItemURIs = [];
     this.stoppedChangingActivePaneItemTimeout = null;
 
+    this.codeEditorRegistry = new CodeEditorRegistry();
     this.scandalDirectorySearcher = new DefaultDirectorySearcher();
     this.ripgrepDirectorySearcher = new RipgrepDirectorySearcher();
     this.consumeServices(this.packageManager);
@@ -507,6 +509,13 @@ module.exports = class Workspace extends Model {
     this.project.onDidChangePaths(this.updateWindowTitle);
     this.subscribeToAddedItems();
     this.subscribeToMovedItems();
+    this.codeEditorRegistry.onDidAttachEditor(editor => {
+      this.emitter.emit('did-add-text-editor', {
+        textEditor: editor,
+        pane: null,
+        index: -1
+      });
+    });
     this.subscribeToDockToggling();
 
     this.disposables.add(
@@ -1646,6 +1655,22 @@ module.exports = class Workspace extends Model {
     return editor;
   }
 
+  // Public: Create a new text editor that is not attached to any pane.
+  //
+  // The editor participates in normal workspace lifecycle events (e.g.
+  // {::observeTextEditors}) only once its element is inserted into the DOM.
+  // Attach `editor.getElement()` wherever you like; remove it to make the
+  // editor inactive again. Call `editor.destroy()` when done.
+  //
+  // * `options` (optional) {Object} — same options accepted by {TextEditor}.
+  //
+  // Returns a {TextEditor}.
+  createTextEditor(options = {}) {
+    const editor = this.buildTextEditor(options);
+    this.codeEditorRegistry.add(editor);
+    return editor;
+  }
+
   // Public: Asynchronously reopens the last-closed item's URI if it hasn't already been
   // reopened.
   //
@@ -1727,7 +1752,10 @@ module.exports = class Workspace extends Model {
   //
   // Returns an {Array} of {TextEditor}s.
   getTextEditors() {
-    return this.getPaneItems().filter(item => item instanceof TextEditor);
+    const paneEditors = this.getPaneItems().filter(
+      item => item instanceof TextEditor
+    );
+    return [...paneEditors, ...this.codeEditorRegistry.getActiveEditors()];
   }
 
   // Essential: Get the workspace center's active item if it is a {TextEditor}.

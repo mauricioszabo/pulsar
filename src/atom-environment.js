@@ -211,6 +211,7 @@ class AtomEnvironment {
     });
 
     this.themes.workspace = this.workspace;
+    this.codeEditors = this.workspace.codeEditorRegistry;
 
     if (this.keymaps.canLoadBundledKeymapsFromMemory()) {
       this.keymaps.loadBundledKeymaps();
