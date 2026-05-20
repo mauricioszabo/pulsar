@@ -1765,10 +1765,10 @@ module.exports = class Workspace extends Model {
   //
   // Returns an {Array} of {TextEditor}s.
   getTextEditors() {
-    const paneEditors = this.getPaneItems().filter(
-      item => item instanceof TextEditor
-    );
-    return [...paneEditors, ...this.codeEditorRegistry.getActiveEditors()];
+    return [
+      ...this.textEditorRegistry.editors,
+      ...this.codeEditorRegistry.getActiveEditors()
+    ];
   }
 
   // Essential: Get the workspace center's active item if it is a {TextEditor}.
