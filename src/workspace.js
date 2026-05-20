@@ -516,6 +516,19 @@ module.exports = class Workspace extends Model {
         index: -1
       });
     });
+
+    this.codeEditorRegistry.onDidChangeActiveEditor(editor => {
+      // Only emit if a code editor gained focus (null means focus left all code
+      // editors; in that case the pane system fires its own event if a pane
+      // editor is now active, so we only emit undefined when nothing is active).
+      if (editor) {
+        this.hasActiveTextEditor = true;
+        this.emitter.emit('did-change-active-text-editor', editor);
+      } else if (!(this.getCenter().getActivePaneItem() instanceof TextEditor)) {
+        this.hasActiveTextEditor = false;
+        this.emitter.emit('did-change-active-text-editor', undefined);
+      }
+    });
     this.subscribeToDockToggling();
 
     this.disposables.add(
@@ -1764,9 +1777,8 @@ module.exports = class Workspace extends Model {
   // active item is not a {TextEditor}.
   getActiveTextEditor() {
     const activeItem = this.getCenter().getActivePaneItem();
-    if (activeItem instanceof TextEditor) {
-      return activeItem;
-    }
+    if (activeItem instanceof TextEditor) return activeItem;
+    return this.codeEditorRegistry.getActiveEditor() || undefined;
   }
 
   // Save all pane items.
