@@ -1776,9 +1776,11 @@ module.exports = class Workspace extends Model {
   // Returns a {TextEditor} or `undefined` if the workspace center's current
   // active item is not a {TextEditor}.
   getActiveTextEditor() {
-    const activeItem = this.getCenter().getActivePaneItem();
-    if (activeItem instanceof TextEditor) return activeItem;
-    return this.codeEditorRegistry.getActiveEditor() || undefined;
+    return (
+      this.codeEditorRegistry.getActiveEditor() ||
+      this.textEditorRegistry.getActiveTextEditor() ||
+      undefined
+    );
   }
 
   // Save all pane items.

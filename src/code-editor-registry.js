@@ -3,14 +3,14 @@ const { Emitter, CompositeDisposable, Disposable } = require('event-kit');
 // Registry for "code editors" — TextEditors created outside the pane system
 // via `atom.workspace.createTextEditor()`. Lifecycle is DOM-driven: an editor
 // becomes active when its element attaches to the document, and inactive when
-// it detaches. Focus changes among attached editors are tracked via a single
-// shared `focusin` listener on `document`.
+// it detaches.
 module.exports = class CodeEditorRegistry {
   constructor() {
     this.emitter = new Emitter();
     this.editors = new Set();
     this.activeEditors = new Set();
-    this._activeFocusedEditor = null;
+    // Only used to deduplicate did-change-active-editor emissions.
+    this._prevActive = null;
     this._focusHandler = () => this._handleFocusin();
   }
 
@@ -44,9 +44,12 @@ module.exports = class CodeEditorRegistry {
         if (this.activeEditors.size === 0) {
           document.removeEventListener('focusin', this._focusHandler, true);
         }
-        if (this._activeFocusedEditor === editor) {
-          this._activeFocusedEditor = null;
-          this.emitter.emit('did-change-active-editor', null);
+        // If this editor was the last one we emitted as active, re-check now
+        // that it's gone (getActiveEditor will no longer find it).
+        if (this._prevActive === editor) {
+          const nowActive = this.getActiveEditor();
+          this._prevActive = nowActive;
+          this.emitter.emit('did-change-active-editor', nowActive);
         }
         this.emitter.emit('did-detach-editor', editor);
       })
@@ -71,22 +74,25 @@ module.exports = class CodeEditorRegistry {
       if (this.activeEditors.size === 0) {
         document.removeEventListener('focusin', this._focusHandler, true);
       }
-      if (this._activeFocusedEditor === editor) {
-        this._activeFocusedEditor = null;
-        this.emitter.emit('did-change-active-editor', null);
+      if (this._prevActive === editor) {
+        const nowActive = this.getActiveEditor();
+        this._prevActive = nowActive;
+        this.emitter.emit('did-change-active-editor', nowActive);
       }
     }
   }
 
   _handleFocusin() {
-    const focused = this._findFocusedEditor();
-    if (focused !== this._activeFocusedEditor) {
-      this._activeFocusedEditor = focused;
+    const focused = this.getActiveEditor();
+    if (focused !== this._prevActive) {
+      this._prevActive = focused;
       this.emitter.emit('did-change-active-editor', focused);
     }
   }
 
-  _findFocusedEditor() {
+  // Returns the code editor whose element currently contains DOM focus, or null.
+  // Computed directly from document.activeElement — no cached state.
+  getActiveEditor() {
     for (const editor of this.activeEditors) {
       const el = editor.getElement();
       if (el === document.activeElement || el.contains(document.activeElement)) {
@@ -94,11 +100,6 @@ module.exports = class CodeEditorRegistry {
       }
     }
     return null;
-  }
-
-  // Returns the code editor that currently has DOM focus, or null.
-  getActiveEditor() {
-    return this._activeFocusedEditor;
   }
 
   // Returns all editors currently attached to the DOM.
