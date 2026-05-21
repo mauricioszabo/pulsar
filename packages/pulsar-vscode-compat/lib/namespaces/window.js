@@ -587,6 +587,7 @@ function setStatusBarMessage(text, hideAfterOrThenable) {
 
 // --- Misc stubs ---
 function registerWebviewPanelSerializer(viewType, serializer) { return new Disposable(() => {}); }
+function registerWebviewViewProvider(viewType, provider, options) { return new Disposable(() => {}); }
 function registerCustomEditorProvider(viewType, provider, options) { return new Disposable(() => {}); }
 function registerFileDecorationProvider(provider) { return new Disposable(() => {}); }
 
@@ -626,6 +627,7 @@ module.exports = {
   createTreeView,
   registerUriHandler,
   registerWebviewPanelSerializer,
+  registerWebviewViewProvider,
   registerCustomEditorProvider,
   registerFileDecorationProvider,
   setStatusBarMessage,

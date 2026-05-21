@@ -46,4 +46,11 @@ class CancellationTokenSource {
   dispose() { this.cancel(); }
 }
 
-module.exports = { CancellationToken, CancellationTokenSource };
+class CancellationError extends Error {
+  constructor() {
+    super('Canceled');
+    this.name = 'Canceled';
+  }
+}
+
+module.exports = { CancellationToken, CancellationTokenSource, CancellationError };

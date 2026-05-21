@@ -7,7 +7,10 @@ const { WorkspaceEdit } = require('../types/workspace-edit');
 const { FileSystemWatcher } = require('../types/file-system-watcher');
 const { Disposable } = require('../types/disposable');
 const { Range } = require('../types/range');
+const { Position } = require('../types/position');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 const _onDidOpenTextDocument = new EventEmitter();
 const _onDidCloseTextDocument = new EventEmitter();
@@ -27,6 +30,75 @@ const _onWillRenameFiles = new EventEmitter();
 const contentProviders = new Map();
 
 let _initialized = false;
+let _configurationDefaults = null;
+
+function readJSON(filePath) {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { return null; }
+}
+
+function cloneDefaultValue(value) {
+  if (value === undefined) return undefined;
+  try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
+}
+
+function configurationSections(contributes) {
+  if (!contributes || !contributes.configuration) return [];
+  return Array.isArray(contributes.configuration) ? contributes.configuration : [contributes.configuration];
+}
+
+function packageSearchPaths() {
+  const paths = new Set();
+
+  try {
+    for (const pkg of atom.packages.getLoadedPackages()) {
+      if (pkg && pkg.path) paths.add(pkg.path);
+    }
+  } catch (e) {}
+
+  try {
+    for (const pkgPath of atom.packages.getAvailablePackagePaths()) {
+      paths.add(pkgPath);
+    }
+  } catch (e) {}
+
+  const userPackagesPath = path.join(os.homedir(), '.pulsar', 'packages');
+  try {
+    for (const name of fs.readdirSync(userPackagesPath)) {
+      paths.add(path.join(userPackagesPath, name));
+    }
+  } catch (e) {}
+
+  return Array.from(paths);
+}
+
+function loadConfigurationDefaults() {
+  if (_configurationDefaults) return _configurationDefaults;
+
+  _configurationDefaults = new Map();
+  for (const packagePath of packageSearchPaths()) {
+    const manifest = readJSON(path.join(packagePath, 'extension', 'package.json'));
+    if (!manifest || !manifest.contributes) continue;
+
+    for (const section of configurationSections(manifest.contributes)) {
+      const properties = section && section.properties;
+      if (!properties) continue;
+
+      for (const [key, schema] of Object.entries(properties)) {
+        if (schema && Object.prototype.hasOwnProperty.call(schema, 'default') && !_configurationDefaults.has(key)) {
+          _configurationDefaults.set(key, schema.default);
+        }
+      }
+    }
+  }
+
+  return _configurationDefaults;
+}
+
+function getConfigurationDefault(fullKey) {
+  const defaults = loadConfigurationDefaults();
+  if (!defaults.has(fullKey)) return undefined;
+  return cloneDefaultValue(defaults.get(fullKey));
+}
 
 function _init() {
   if (_initialized) return;
@@ -109,7 +181,9 @@ function findFiles(include, exclude, maxResults, token) {
     const pattern = typeof include === 'string' ? include : (include && include.pattern) || '**/*';
     const excludePattern = typeof exclude === 'string' ? exclude : (exclude && exclude.pattern) || null;
 
-    atom.project.scan(new RegExp(''), { paths: [pattern] }, () => {}).catch(() => {});
+    if (atom.project && typeof atom.project.scan === 'function') {
+      atom.project.scan(new RegExp(''), { paths: [pattern] }, () => {}).catch(() => {});
+    }
 
     // Use project.getDirectories to enumerate files
     try {
@@ -128,19 +202,74 @@ function findFiles(include, exclude, maxResults, token) {
     }
   });
 }
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function textSearchRegex(query) {
+  const pattern = typeof query === "string" ? query : (query.pattern || "");
+  if (!pattern) return null;
+  const flags = query.isCaseSensitive ? "g" : "gi";
+  return query.isRegExp ? new RegExp(pattern, flags) : new RegExp(escapeRegExp(pattern), flags);
+}
+
+function rangeForTextMatch(line, start, length) {
+  return new Range(new Position(line, start), new Position(line, start + length));
+}
+
+async function findTextInFilesFallback(query, options, callback) {
+  const regex = textSearchRegex(query);
+  if (!regex) return [];
+
+  const results = [];
+  const files = await findFiles(
+    options.include || "**/*",
+    options.exclude,
+    options.maxResults
+  );
+
+  for (const uri of files) {
+    let text;
+    try { text = await fs.promises.readFile(uri.fsPath, "utf8"); } catch (e) { continue; }
+
+    const lines = text.split(/\r?\n/);
+    for (let lineNumber = 0; lineNumber < lines.length; lineNumber++) {
+      const line = lines[lineNumber];
+      regex.lastIndex = 0;
+      let match;
+      while ((match = regex.exec(line))) {
+        const range = rangeForTextMatch(lineNumber, match.index, match[0].length);
+        const result = {
+          uri,
+          ranges: [range],
+          preview: { text: line, matches: [range] }
+        };
+        results.push(result);
+        if (callback) callback(result);
+        if (match[0].length === 0) regex.lastIndex++;
+      }
+    }
+  }
+
+  return results;
+}
 
 async function findTextInFiles(query, optionsOrCallback, callback) {
-  const opts = typeof optionsOrCallback === 'object' ? optionsOrCallback : {};
-  const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : callback;
+  const opts = typeof optionsOrCallback === "object" ? optionsOrCallback : {};
+  const cb = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
   const results = [];
 
+  if (!atom.project || typeof atom.project.scan !== "function") {
+    return findTextInFilesFallback(query, opts, cb);
+  }
+
   await new Promise(resolve => {
-    const pattern = typeof query === 'string' ? query : (query.pattern || '');
-    atom.project.scan(new RegExp(pattern, query.isRegExp ? '' : 'i'), {}, (result) => {
+    const pattern = typeof query === "string" ? query : (query.pattern || "");
+    atom.project.scan(new RegExp(pattern, query.isRegExp ? "" : "i"), {}, (result) => {
       const match = {
         uri: Uri.file(result.filePath),
         ranges: result.matches ? result.matches.map(m => Range.fromAtomRange(m.range)) : [],
-        preview: { text: result.line || '', matches: [] }
+        preview: { text: result.line || "", matches: [] }
       };
       results.push(match);
       if (cb) cb(match);
@@ -200,7 +329,10 @@ class WorkspaceConfiguration {
       // Try direct key
       try { val = atom.config.get(key); } catch (e) {}
     }
-    return val !== undefined ? val : defaultValue;
+    if (val !== undefined) return val;
+
+    const manifestDefault = getConfigurationDefault(fullKey);
+    return manifestDefault !== undefined ? manifestDefault : defaultValue;
   }
 
   has(key) { return this.get(key) !== undefined; }
@@ -208,7 +340,7 @@ class WorkspaceConfiguration {
   inspect(key) {
     const fullKey = this._section ? `${this._section}.${key}` : key;
     const val = atom.config.get(fullKey);
-    return { key: fullKey, globalValue: val, defaultValue: undefined, workspaceValue: undefined };
+    return { key: fullKey, globalValue: val, defaultValue: getConfigurationDefault(fullKey), workspaceValue: undefined };
   }
 
   async update(key, value, target) {
@@ -236,6 +368,10 @@ function createFileSystemWatcher(globPattern, ignoreCreate, ignoreChange, ignore
   return new FileSystemWatcher(globPattern, ignoreCreate, ignoreChange, ignoreDelete);
 }
 
+function registerNotebookSerializer(notebookType, serializer, options) {
+  return new Disposable(() => {});
+}
+
 function registerTextDocumentContentProvider(scheme, provider) {
   contentProviders.set(scheme, provider);
   const opener = atom.workspace.addOpener(uri => {
@@ -254,6 +390,93 @@ function registerTextDocumentContentProvider(scheme, provider) {
     opener.dispose();
   });
 }
+
+const FileType = Object.freeze({ Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 });
+
+function uriToFsPath(uri) {
+  return typeof uri === 'string' ? uri : uri.fsPath;
+}
+
+function statType(stats, targetStats) {
+  if (stats.isSymbolicLink()) {
+    if (targetStats && targetStats.isDirectory()) return FileType.SymbolicLink | FileType.Directory;
+    if (targetStats && targetStats.isFile()) return FileType.SymbolicLink | FileType.File;
+    return FileType.SymbolicLink;
+  }
+  if (stats.isDirectory()) return FileType.Directory;
+  if (stats.isFile()) return FileType.File;
+  return FileType.Unknown;
+}
+
+async function stat(uri) {
+  const filePath = uriToFsPath(uri);
+  const stats = await fs.promises.lstat(filePath);
+  let targetStats;
+  if (stats.isSymbolicLink()) {
+    try { targetStats = await fs.promises.stat(filePath); } catch (e) {}
+  }
+  return {
+    type: statType(stats, targetStats),
+    ctime: stats.ctimeMs,
+    mtime: stats.mtimeMs,
+    size: stats.size
+  };
+}
+
+const workspaceFileSystem = {
+  stat,
+  async readDirectory(uri) {
+    const entries = await fs.promises.readdir(uriToFsPath(uri), { withFileTypes: true });
+    return entries.map(entry => {
+      let type = FileType.Unknown;
+      if (entry.isDirectory()) type = FileType.Directory;
+      else if (entry.isFile()) type = FileType.File;
+      else if (entry.isSymbolicLink()) type = FileType.SymbolicLink;
+      return [entry.name, type];
+    });
+  },
+  async createDirectory(uri) {
+    await fs.promises.mkdir(uriToFsPath(uri), { recursive: true });
+  },
+  async readFile(uri) {
+    return fs.promises.readFile(uriToFsPath(uri));
+  },
+  async writeFile(uri, content) {
+    await fs.promises.writeFile(uriToFsPath(uri), Buffer.from(content));
+  },
+  async delete(uri, options = {}) {
+    await fs.promises.rm(uriToFsPath(uri), {
+      recursive: !!options.recursive,
+      force: !!options.useTrash
+    });
+  },
+  async rename(source, target, options = {}) {
+    if (!options.overwrite && fs.existsSync(uriToFsPath(target))) {
+      const error = new Error('File exists: ' + uriToFsPath(target));
+      error.code = 'EEXIST';
+      throw error;
+    }
+    if (options.overwrite) {
+      await fs.promises.rm(uriToFsPath(target), { recursive: true, force: true });
+    }
+    await fs.promises.rename(uriToFsPath(source), uriToFsPath(target));
+  },
+  async copy(source, target, options = {}) {
+    if (!options.overwrite && fs.existsSync(uriToFsPath(target))) {
+      const error = new Error('File exists: ' + uriToFsPath(target));
+      error.code = 'EEXIST';
+      throw error;
+    }
+    await fs.promises.cp(uriToFsPath(source), uriToFsPath(target), {
+      recursive: true,
+      force: !!options.overwrite,
+      errorOnExist: !options.overwrite
+    });
+  },
+  isWritableFileSystem(scheme) {
+    return scheme === 'file';
+  }
+};
 
 function asRelativePath(pathOrUri, includeWorkspaceFolder) {
   const filePath = typeof pathOrUri === 'string' ? pathOrUri : pathOrUri.fsPath;
@@ -280,6 +503,7 @@ module.exports = {
   get isTrusted() { return true; },
   get textDocuments() { return atom.workspace.getTextEditors().map(e => new TextDocument(e)); },
   get notebookDocuments() { return []; },
+  fs: workspaceFileSystem,
 
   openTextDocument,
   saveAll,
@@ -289,6 +513,7 @@ module.exports = {
   getConfiguration,
   getWorkspaceFolder,
   createFileSystemWatcher,
+  registerNotebookSerializer,
   registerTextDocumentContentProvider,
   asRelativePath,
 

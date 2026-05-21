@@ -5,7 +5,7 @@ const { Position } = require('./types/position');
 const { Range } = require('./types/range');
 const { Selection } = require('./types/selection');
 const { Uri } = require('./types/uri');
-const { CancellationToken, CancellationTokenSource } = require('./types/cancellation');
+const { CancellationToken, CancellationTokenSource, CancellationError } = require('./types/cancellation');
 const { Disposable } = require('./types/disposable');
 const { EventEmitter } = require('./types/event-emitter');
 const { MarkdownString } = require('./types/markdown-string');
@@ -232,6 +232,7 @@ const vscode = {
   Uri,
   CancellationToken,
   CancellationTokenSource,
+  CancellationError,
   Disposable,
   EventEmitter,
   MarkdownString,

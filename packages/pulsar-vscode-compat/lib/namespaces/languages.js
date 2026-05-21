@@ -126,6 +126,10 @@ function registerTypeDefinitionProvider(documentSelector, provider) {
   });
 }
 
+function registerReferenceProvider(documentSelector, provider) {
+  return registerReferencesProvider(documentSelector, provider);
+}
+
 function registerReferencesProvider(documentSelector, provider) {
   const symProvider = makeReferenceProvider(`vscode-references-${Date.now()}`, 'pulsar-vscode-compat', documentSelector, provider);
   symbolProviders.push(symProvider);
@@ -400,6 +404,7 @@ module.exports = {
   registerDefinitionProvider,
   registerImplementationProvider,
   registerTypeDefinitionProvider,
+  registerReferenceProvider,
   registerReferencesProvider,
   registerDocumentSymbolProvider,
   registerWorkspaceSymbolProvider,
