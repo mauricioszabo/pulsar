@@ -1,0 +1,38 @@
+{
+  "name": "pulsar-vscode-compat",
+  "version": "0.1.0",
+  "description": "VSCode API compatibility layer for Pulsar",
+  "main": "./lib/main.js",
+  "engines": {
+    "atom": ">=1.0.0 <2.0.0"
+  },
+  "consumedServices": {
+    "status-bar": {
+      "versions": {
+        "^1.0.0": "consumeStatusBar"
+      }
+    },
+    "linter-indie": {
+      "versions": {
+        "2.0.0": "consumeLinterIndie"
+      }
+    },
+    "autocomplete.watchEditor": {
+      "versions": {
+        "1.0.0": "consumeWatchEditor"
+      }
+    }
+  },
+  "providedServices": {
+    "autocomplete.provider": {
+      "versions": {
+        "5.1.0": "provideAutocomplete"
+      }
+    },
+    "symbol.provider": {
+      "versions": {
+        "1.0.0": "provideSymbols"
+      }
+    }
+  }
+}
