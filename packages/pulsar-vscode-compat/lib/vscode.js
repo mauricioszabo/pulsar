@@ -31,6 +31,8 @@ const { OutputChannel, LogOutputChannel, LogLevel } = require('./types/output-ch
 const { StatusBarItem, StatusBarAlignment } = require('./types/status-bar-item');
 const { FileSystemWatcher, FileChangeType } = require('./types/file-system-watcher');
 
+const { ExtensionContext, Memento, SecretStorage, EnvironmentVariableCollection } = require('./types/extension-context');
+
 // Namespaces
 const commands = require('./namespaces/commands');
 const env = require('./namespaces/env');
@@ -349,6 +351,11 @@ const vscode = {
 
   // window extras
   createLanguageStatusItem,
+
+  ExtensionContext,
+  Memento,
+  SecretStorage,
+  EnvironmentVariableCollection,
 
   version: atom.getVersion ? atom.getVersion() : '0.0.0'
 };
