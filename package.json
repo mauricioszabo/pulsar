@@ -155,6 +155,7 @@
     "postcss": "8.4.31",
     "postcss-selector-parser": "6.0.4",
     "pulsar-updater": "file:packages/pulsar-updater",
+    "pulsar-vscode-compat": "file:packages/pulsar-vscode-compat",
     "resolve": "1.18.1",
     "scoped-property-store": "^0.17.0",
     "season": "^6.0.2",
@@ -284,7 +285,8 @@
     "language-toml": "file:./packages/language-toml",
     "language-typescript": "file:./packages/language-typescript",
     "language-xml": "file:./packages/language-xml",
-    "language-yaml": "file:./packages/language-yaml"
+    "language-yaml": "file:./packages/language-yaml",
+    "pulsar-vscode-compat": "file:./packages/pulsar-vscode-compat"
   },
   "private": true,
   "scripts": {

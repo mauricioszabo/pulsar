@@ -8280,6 +8280,9 @@ psl@^1.1.28:
     superagent "^10.0.0"
     winreg "^1.2.4"
 
+"pulsar-vscode-compat@file:packages/pulsar-vscode-compat":
+  version "0.1.0"
+
 pump@^3.0.0:
   version "3.0.3"
   resolved "https://registry.yarnpkg.com/pump/-/pump-3.0.3.tgz#151d979f1a29668dc0025ec589a455b53282268d"
