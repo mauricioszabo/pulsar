@@ -17,7 +17,6 @@ const PanelContainer = require('./panel-container');
 const Task = require('./task');
 const WorkspaceCenter = require('./workspace-center');
 const { createWorkspaceElement } = require('./workspace-element');
-const CodeEditorRegistry = require('./code-editor-registry');
 
 // Given a single glob pattern matcher, test it against a relativized path
 // within the project. Even if this path itself doesn't match the glob, it's
@@ -335,7 +334,6 @@ module.exports = class Workspace extends Model {
     this.destroyedItemURIs = [];
     this.stoppedChangingActivePaneItemTimeout = null;
 
-    this.codeEditorRegistry = new CodeEditorRegistry();
     this.scandalDirectorySearcher = new DefaultDirectorySearcher();
     this.ripgrepDirectorySearcher = new RipgrepDirectorySearcher();
     this.consumeServices(this.packageManager);
@@ -509,22 +507,21 @@ module.exports = class Workspace extends Model {
     this.project.onDidChangePaths(this.updateWindowTitle);
     this.subscribeToAddedItems();
     this.subscribeToMovedItems();
-    this.codeEditorRegistry.onDidAttachEditor(editor => {
-      this.emitter.emit('did-add-text-editor', {
-        textEditor: editor,
-        pane: null,
-        index: -1
-      });
+    this.textEditorRegistry.onDidAttachEditor(editor => {
+      if (!this.paneForItem(editor)) {
+        this.emitter.emit('did-add-text-editor', {
+          textEditor: editor,
+          pane: null,
+          index: -1
+        });
+      }
     });
 
-    this.codeEditorRegistry.onDidChangeActiveEditor(editor => {
-      // Only emit if a code editor gained focus (null means focus left all code
-      // editors; in that case the pane system fires its own event if a pane
-      // editor is now active, so we only emit undefined when nothing is active).
-      if (editor) {
+    this.textEditorRegistry.onDidChangeActiveEditor(editor => {
+      if (editor && !this.paneForItem(editor)) {
         this.hasActiveTextEditor = true;
         this.emitter.emit('did-change-active-text-editor', editor);
-      } else if (!(this.getCenter().getActivePaneItem() instanceof TextEditor)) {
+      } else if (!editor && !this.getActiveTextEditor()) {
         this.hasActiveTextEditor = false;
         this.emitter.emit('did-change-active-text-editor', undefined);
       }
@@ -1680,7 +1677,8 @@ module.exports = class Workspace extends Model {
   // Returns a {TextEditor}.
   createTextEditor(options = {}) {
     const editor = this.buildTextEditor(options);
-    this.codeEditorRegistry.add(editor);
+    const sub = this.textEditorRegistry.add(editor);
+    editor.onDidDestroy(() => sub.dispose());
     return editor;
   }
 
@@ -1765,10 +1763,7 @@ module.exports = class Workspace extends Model {
   //
   // Returns an {Array} of {TextEditor}s.
   getTextEditors() {
-    return [
-      ...this.textEditorRegistry.editors,
-      ...this.codeEditorRegistry.editors
-    ];
+    return Array.from(this.textEditorRegistry.editors);
   }
 
   // Essential: Get the workspace center's active item if it is a {TextEditor}.

@@ -40,6 +40,7 @@ module.exports = class TextEditorRegistry {
     this.config = config;
     this.assert = assert;
     this.packageManager = packageManager;
+    this._focusHandler = () => this._handleFocusin();
     this.clear();
   }
 
@@ -57,6 +58,12 @@ module.exports = class TextEditorRegistry {
     if (this.subscriptions) {
       this.subscriptions.dispose();
     }
+    if (this._editorSubscriptions) {
+      for (const subs of this._editorSubscriptions.values()) subs.dispose();
+    }
+    if (this._attachedEditors && this._attachedEditors.size > 0) {
+      document.removeEventListener('focusin', this._focusHandler, true);
+    }
 
     this.subscriptions = new CompositeDisposable();
     this.editors = new Set();
@@ -66,10 +73,17 @@ module.exports = class TextEditorRegistry {
     this.editorsWithMaintainedGrammar = new Set();
     this.editorGrammarOverrides = {};
     this.editorGrammarScores = new WeakMap();
+    this._attachedEditors = new Set();
+    this._editorSubscriptions = new Map();
+    this._prevActive = null;
   }
 
   destroy() {
     this.subscriptions.dispose();
+    for (const subs of this._editorSubscriptions.values()) subs.dispose();
+    if (this._attachedEditors.size > 0) {
+      document.removeEventListener('focusin', this._focusHandler, true);
+    }
     this.editorsWithMaintainedConfig = null;
   }
 
@@ -84,6 +98,29 @@ module.exports = class TextEditorRegistry {
     this.editors.add(editor);
     editor.registered = true;
     this.emitter.emit('did-add-editor', editor);
+
+    const element = editor.getElement();
+    const subs = new CompositeDisposable(
+      element.onDidAttach(() => {
+        this._attachedEditors.add(editor);
+        if (this._attachedEditors.size === 1) {
+          document.addEventListener('focusin', this._focusHandler, true);
+        }
+        this.emitter.emit('did-attach-editor', editor);
+      }),
+      element.onDidDetach(() => {
+        this._attachedEditors.delete(editor);
+        if (this._attachedEditors.size === 0) {
+          document.removeEventListener('focusin', this._focusHandler, true);
+        }
+        if (this._prevActive === editor) {
+          this._prevActive = null;
+          this.emitter.emit('did-change-active-editor', null);
+        }
+        this.emitter.emit('did-detach-editor', editor);
+      })
+    );
+    this._editorSubscriptions.set(editor, subs);
 
     return new Disposable(() => this.remove(editor));
   }
@@ -112,7 +149,43 @@ module.exports = class TextEditorRegistry {
   remove(editor) {
     const removed = this.editors.delete(editor);
     editor.registered = false;
+    if (removed) {
+      const subs = this._editorSubscriptions.get(editor);
+      if (subs) {
+        subs.dispose();
+        this._editorSubscriptions.delete(editor);
+      }
+      if (this._attachedEditors.delete(editor)) {
+        if (this._attachedEditors.size === 0) {
+          document.removeEventListener('focusin', this._focusHandler, true);
+        }
+        if (this._prevActive === editor) {
+          this._prevActive = null;
+          this.emitter.emit('did-change-active-editor', null);
+        }
+      }
+    }
     return removed;
+  }
+
+  _handleFocusin() {
+    const focused = this.getActiveTextEditor();
+    if (focused !== this._prevActive) {
+      this._prevActive = focused;
+      this.emitter.emit('did-change-active-editor', focused);
+    }
+  }
+
+  onDidAttachEditor(callback) {
+    return this.emitter.on('did-attach-editor', callback);
+  }
+
+  onDidDetachEditor(callback) {
+    return this.emitter.on('did-detach-editor', callback);
+  }
+
+  onDidChangeActiveEditor(callback) {
+    return this.emitter.on('did-change-active-editor', callback);
   }
 
   // Gets the currently active text editor.
