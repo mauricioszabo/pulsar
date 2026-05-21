@@ -24,6 +24,11 @@
     }
   },
   "providedServices": {
+    "pulsar.api": {
+      "versions": {
+        "0.1.0": "providePulsarApi"
+      }
+    },
     "autocomplete.provider": {
       "versions": {
         "5.1.0": "provideAutocomplete"

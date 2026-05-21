@@ -51,6 +51,9 @@ module.exports = function({ blobStore }) {
     return original.concat(exportsPath);
   };
 
+  const { patchRequire } = require('./module-utils');
+  patchRequire(global.atom);
+
   process.env.NODE_PATH = exportsPath;
 
   // Make React faster
