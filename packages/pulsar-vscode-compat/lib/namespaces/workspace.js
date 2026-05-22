@@ -31,6 +31,7 @@ const contentProviders = new Map();
 
 let _initialized = false;
 let _configurationDefaults = null;
+const openedDocumentLanguageIds = new WeakMap();
 
 function readJSON(filePath) {
   try { return JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (e) { return null; }
@@ -126,7 +127,7 @@ function _init() {
   atom.workspace.observeTextEditors(editor => {
     const document = getTextDocument(editor);
     let lastLanguageId = document && document.languageId;
-    _onDidOpenTextDocument.fire(document);
+    fireDidOpenTextDocument(document);
 
     if (typeof editor.onDidChangeGrammar === 'function') {
       editor.onDidChangeGrammar(() => {
@@ -134,7 +135,7 @@ function _init() {
         const nextLanguageId = changedDocument && changedDocument.languageId;
         if (nextLanguageId && nextLanguageId !== lastLanguageId) {
           lastLanguageId = nextLanguageId;
-          _onDidOpenTextDocument.fire(changedDocument);
+          fireDidOpenTextDocument(changedDocument);
         }
       });
     }
@@ -160,6 +161,7 @@ function _init() {
 
     editor.onDidDestroy(() => {
       const closedDocument = getTextDocument(editor);
+      if (closedDocument) openedDocumentLanguageIds.delete(closedDocument);
       _onDidCloseTextDocument.fire(closedDocument);
       forgetTextDocument(editor, closedDocument);
     });
@@ -175,6 +177,24 @@ function _init() {
       removed: []
     });
   });
+}
+
+function fireDidOpenTextDocument(document) {
+  if (!document) return;
+  openedDocumentLanguageIds.set(document, document.languageId);
+  _onDidOpenTextDocument.fire(document);
+}
+
+function _ensureTextDocument(editor) {
+  const document = getTextDocument(editor);
+  if (!document) return document;
+
+  const languageId = document.languageId;
+  if (openedDocumentLanguageIds.get(document) !== languageId) {
+    fireDidOpenTextDocument(document);
+  }
+
+  return document;
 }
 
 function openTextDocument(uriOrPathOrOptions) {
@@ -565,5 +585,6 @@ module.exports = {
   onWillDeleteFiles: _onWillDeleteFiles.event,
   onWillRenameFiles: _onWillRenameFiles.event,
 
-  _init
+  _init,
+  _ensureTextDocument
 };

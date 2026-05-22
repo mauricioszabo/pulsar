@@ -20,43 +20,33 @@ class TextLine {
 }
 
 const textDocumentsByEditor = new WeakMap();
-const textDocumentsByBuffer = new WeakMap();
-
-function editorBuffer(atomEditor) {
-  try {
-    return atomEditor && atomEditor.getBuffer ? atomEditor.getBuffer() : undefined;
-  } catch (e) {
-    return undefined;
-  }
-}
 
 function rememberTextDocument(atomEditor, document) {
   if (!atomEditor || !document) return document;
   textDocumentsByEditor.set(atomEditor, document);
-  const buffer = editorBuffer(atomEditor);
-  if (buffer) textDocumentsByBuffer.set(buffer, document);
   return document;
+}
+
+function isClosedTextDocument(document) {
+  if (!document) return false;
+  try {
+    return !!document.isClosed;
+  } catch (e) {
+    return true;
+  }
 }
 
 function forgetTextDocument(atomEditor, document) {
   if (!atomEditor) return;
   textDocumentsByEditor.delete(atomEditor);
-
-  const buffer = editorBuffer(atomEditor);
-  if (buffer && (!document || textDocumentsByBuffer.get(buffer) === document)) {
-    textDocumentsByBuffer.delete(buffer);
-  }
 }
 
 function getTextDocument(atomEditor) {
   if (!atomEditor) return undefined;
 
   const byEditor = textDocumentsByEditor.get(atomEditor);
-  if (byEditor) return byEditor;
-
-  const buffer = editorBuffer(atomEditor);
-  const byBuffer = buffer && textDocumentsByBuffer.get(buffer);
-  if (byBuffer) return rememberTextDocument(atomEditor, byBuffer);
+  if (byEditor && !isClosedTextDocument(byEditor)) return byEditor;
+  if (byEditor) textDocumentsByEditor.delete(atomEditor);
 
   return rememberTextDocument(atomEditor, new TextDocument(atomEditor));
 }
@@ -69,11 +59,8 @@ class TextDocument {
     }
 
     const byEditor = textDocumentsByEditor.get(atomEditor);
-    if (byEditor) return byEditor;
-
-    const buffer = editorBuffer(atomEditor);
-    const byBuffer = buffer && textDocumentsByBuffer.get(buffer);
-    if (byBuffer) return rememberTextDocument(atomEditor, byBuffer);
+    if (byEditor && !isClosedTextDocument(byEditor)) return byEditor;
+    if (byEditor) textDocumentsByEditor.delete(atomEditor);
 
     this._editor = atomEditor;
     rememberTextDocument(atomEditor, this);
@@ -115,8 +102,16 @@ class TextDocument {
   }
 
   getText(range) {
-    if (!range) return this._editor.getText();
-    return this._editor.getTextInBufferRange(range.toAtomRange());
+    if (range) return this._editor.getTextInBufferRange(range.toAtomRange());
+
+    if (this._editor.getBuffer) {
+      const buffer = this._editor.getBuffer();
+      if (buffer && typeof buffer.getText === 'function') {
+        return buffer.getText();
+      }
+    }
+
+    return this._editor.getText();
   }
 
   lineAt(lineOrPosition) {

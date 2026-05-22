@@ -331,16 +331,19 @@ function createInputBox() {
   return ib;
 }
 
+const windowNamespace = {};
+Object.defineProperties(windowNamespace, Object.getOwnPropertyDescriptors(window));
+Object.assign(windowNamespace, {
+  createQuickPick,
+  createInputBox
+});
+
 const vscode = {
   // Namespaces
   commands,
   env,
   extensions,
-  window: {
-    ...window,
-    createQuickPick,
-    createInputBox
-  },
+  window: windowNamespace,
   workspace,
   languages,
   l10n,

@@ -120,25 +120,68 @@ function createCommandListener(command, didDispatch) {
   };
 }
 
+function workspaceTextEditors() {
+  try {
+    return atom.workspace.getTextEditors ? atom.workspace.getTextEditors() : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function isWorkspaceTextEditor(editor) {
+  if (!editor) return false;
+  try {
+    if (typeof editor.isDestroyed === 'function' && editor.isDestroyed()) return false;
+    if (atom.workspace.paneForItem && !atom.workspace.paneForItem(editor)) return false;
+  } catch (e) {
+    return false;
+  }
+  return workspaceTextEditors().includes(editor);
+}
+
+function activePaneTextEditor() {
+  const panes = atom.workspace.getPanes ? atom.workspace.getPanes() : [];
+  for (const pane of panes) {
+    const item = pane && pane.getActiveItem && pane.getActiveItem();
+    if (isWorkspaceTextEditor(item)) return item;
+  }
+  return undefined;
+}
+
 function atomTextEditorFromEvent(event) {
   const target = event && event.target;
   const editorElement = target && typeof target.closest === 'function'
     ? target.closest('atom-text-editor')
     : null;
   if (editorElement && typeof editorElement.getModel === 'function') {
-    return editorElement.getModel();
+    const editor = editorElement.getModel();
+    if (isWorkspaceTextEditor(editor)) return editor;
   }
 
   const currentTarget = event && event.currentTarget;
   if (currentTarget && currentTarget.matches && currentTarget.matches('atom-text-editor') && typeof currentTarget.getModel === 'function') {
-    return currentTarget.getModel();
+    const editor = currentTarget.getModel();
+    if (isWorkspaceTextEditor(editor)) return editor;
   }
 
-  return atom.workspace.getActiveTextEditor && atom.workspace.getActiveTextEditor();
+  const activeEditor = atom.workspace.getActiveTextEditor && atom.workspace.getActiveTextEditor();
+  if (isWorkspaceTextEditor(activeEditor)) return activeEditor;
+
+  const activePaneItem = atom.workspace.getActivePaneItem && atom.workspace.getActivePaneItem();
+  if (isWorkspaceTextEditor(activePaneItem)) return activePaneItem;
+
+  const paneEditor = activePaneTextEditor();
+  if (paneEditor) return paneEditor;
+
+  return workspaceTextEditors().find(isWorkspaceTextEditor);
 }
 
 function dispatchWithEditorOverride(event, callback) {
   const editor = atomTextEditorFromEvent(event);
+  const workspaceNamespace = require('./workspace');
+  if (workspaceNamespace && typeof workspaceNamespace._ensureTextDocument === 'function') {
+    workspaceNamespace._ensureTextDocument(editor);
+  }
   const windowNamespace = require('./window');
   if (windowNamespace && typeof windowNamespace._withActiveTextEditorOverride === 'function') {
     return windowNamespace._withActiveTextEditorOverride(editor, callback);

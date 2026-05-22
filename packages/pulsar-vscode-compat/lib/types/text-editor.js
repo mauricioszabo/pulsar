@@ -85,31 +85,22 @@ class TextEditor {
     this._decorationMap = new Map(); // TextEditorDecorationType → Decoration[]
   }
 
-  get document() { return this._document; }
+  get document() {
+    this._document = getTextDocument(this._editor);
+    return this._document;
+  }
 
   get selection() {
     const sel = this._editor.getLastSelection();
-    const range = sel.getBufferRange();
-    const cursor = sel.cursor;
-    const anchor = cursor.isAtEndOfSelection ? range.start : range.end;
-    return new Selection(
-      new Position(range.start.row, range.start.column),
-      new Position(range.end.row, range.end.column)
-    );
+    return selectionFromAtomSelection(sel);
   }
 
   set selection(sel) {
-    this._editor.setSelectedBufferRange(sel.toAtomRange());
+    this._editor.setSelectedBufferRange(sel.toAtomRange(), { reversed: sel.isReversed });
   }
 
   get selections() {
-    return this._editor.getSelections().map(sel => {
-      const range = sel.getBufferRange();
-      return new Selection(
-        new Position(range.start.row, range.start.column),
-        new Position(range.end.row, range.end.column)
-      );
-    });
+    return this._editor.getSelections().map(selectionFromAtomSelection);
   }
 
   set selections(sels) {
@@ -228,6 +219,18 @@ class TextEditor {
   }
 
   hide() {}
+}
+
+function selectionFromAtomSelection(selection) {
+  const range = selection.getBufferRange();
+  const cursor = selection.cursor || (selection.getCursor && selection.getCursor());
+  const cursorAtEnd = !cursor || cursor.isAtEndOfSelection !== false;
+  const anchor = cursorAtEnd ? range.start : range.end;
+  const active = cursorAtEnd ? range.end : range.start;
+  return new Selection(
+    new Position(anchor.row, anchor.column),
+    new Position(active.row, active.column)
+  );
 }
 
 function endPointRange(range) {

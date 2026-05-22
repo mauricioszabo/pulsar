@@ -178,17 +178,18 @@ function _init() {
   _initialized = true;
 
   const activeEditor = atom.workspace.getActiveTextEditor && atom.workspace.getActiveTextEditor();
-  if (activeEditor && !activeEditor.isDestroyed()) {
+  if (isUsableAtomTextEditor(activeEditor)) {
     _lastActiveTextEditor = activeEditor;
   }
 
   atom.workspace.onDidChangeActiveTextEditor(editor => {
-    if (editor) _lastActiveTextEditor = editor;
-    _onDidChangeActiveTextEditor.fire(editor ? new TextEditor(editor) : undefined);
+    const usableEditor = isUsableAtomTextEditor(editor) ? editor : undefined;
+    if (usableEditor) _lastActiveTextEditor = usableEditor;
+    _onDidChangeActiveTextEditor.fire(usableEditor ? new TextEditor(usableEditor) : undefined);
   });
 
   atom.workspace.observeTextEditors(editor => {
-    if (!_lastActiveTextEditor && !editor.isDestroyed()) _lastActiveTextEditor = editor;
+    if (!_lastActiveTextEditor && isUsableAtomTextEditor(editor)) _lastActiveTextEditor = editor;
     _onDidChangeVisibleTextEditors.fire(atom.workspace.getTextEditors().map(e => new TextEditor(e)));
     editor.onDidDestroy(() => {
       if (_lastActiveTextEditor === editor) _lastActiveTextEditor = undefined;
@@ -1004,11 +1005,37 @@ function registerWebviewViewProvider(viewType, provider, options) { return new D
 function registerCustomEditorProvider(viewType, provider, options) { return new Disposable(() => {}); }
 function registerFileDecorationProvider(provider) { return new Disposable(() => {}); }
 
+function workspaceTextEditors() {
+  try {
+    return atom.workspace.getTextEditors ? atom.workspace.getTextEditors() : [];
+  } catch (e) {
+    return [];
+  }
+}
+
 function isUsableAtomTextEditor(editor) {
-  return editor &&
-    typeof editor.getBuffer === 'function' &&
-    typeof editor.isDestroyed === 'function' &&
-    !editor.isDestroyed();
+  if (!editor ||
+    typeof editor.getBuffer !== 'function' ||
+    typeof editor.isDestroyed !== 'function' ||
+    editor.isDestroyed() ||
+    !workspaceTextEditors().includes(editor)) {
+    return false;
+  }
+
+  try {
+    return !atom.workspace.paneForItem || !!atom.workspace.paneForItem(editor);
+  } catch (e) {
+    return false;
+  }
+}
+
+function activePaneTextEditor() {
+  const panes = atom.workspace.getPanes ? atom.workspace.getPanes() : [];
+  for (const pane of panes) {
+    const item = pane && pane.getActiveItem && pane.getActiveItem();
+    if (isUsableAtomTextEditor(item)) return item;
+  }
+  return undefined;
 }
 
 function getActiveAtomTextEditor() {
@@ -1029,7 +1056,10 @@ function getActiveAtomTextEditor() {
     return _lastActiveTextEditor;
   }
 
-  const editors = atom.workspace.getTextEditors ? atom.workspace.getTextEditors() : [];
+  const paneEditor = activePaneTextEditor();
+  if (paneEditor) return paneEditor;
+
+  const editors = workspaceTextEditors();
   return editors.find(isUsableAtomTextEditor) || undefined;
 }
 
