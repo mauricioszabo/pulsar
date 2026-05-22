@@ -167,6 +167,8 @@ let _initialized = false;
 let _decorationCounter = 0;
 let _terminalCounter = 0;
 let _activeTerminal = undefined;
+let _lastActiveTextEditor = undefined;
+let _activeTextEditorOverride = undefined;
 const _terminals = [];
 const _terminalItemsByUri = new Map();
 let _terminalOpenerDisposable = null;
@@ -175,13 +177,21 @@ function _init() {
   if (_initialized) return;
   _initialized = true;
 
+  const activeEditor = atom.workspace.getActiveTextEditor && atom.workspace.getActiveTextEditor();
+  if (activeEditor && !activeEditor.isDestroyed()) {
+    _lastActiveTextEditor = activeEditor;
+  }
+
   atom.workspace.onDidChangeActiveTextEditor(editor => {
+    if (editor) _lastActiveTextEditor = editor;
     _onDidChangeActiveTextEditor.fire(editor ? new TextEditor(editor) : undefined);
   });
 
   atom.workspace.observeTextEditors(editor => {
+    if (!_lastActiveTextEditor && !editor.isDestroyed()) _lastActiveTextEditor = editor;
     _onDidChangeVisibleTextEditors.fire(atom.workspace.getTextEditors().map(e => new TextEditor(e)));
     editor.onDidDestroy(() => {
+      if (_lastActiveTextEditor === editor) _lastActiveTextEditor = undefined;
       _onDidChangeVisibleTextEditors.fire(atom.workspace.getTextEditors().map(e => new TextEditor(e)));
     });
   });
@@ -994,8 +1004,62 @@ function registerWebviewViewProvider(viewType, provider, options) { return new D
 function registerCustomEditorProvider(viewType, provider, options) { return new Disposable(() => {}); }
 function registerFileDecorationProvider(provider) { return new Disposable(() => {}); }
 
+function isUsableAtomTextEditor(editor) {
+  return editor &&
+    typeof editor.getBuffer === 'function' &&
+    typeof editor.isDestroyed === 'function' &&
+    !editor.isDestroyed();
+}
+
+function getActiveAtomTextEditor() {
+  if (isUsableAtomTextEditor(_activeTextEditorOverride)) {
+    return _activeTextEditorOverride;
+  }
+
+  const activeEditor = atom.workspace.getActiveTextEditor && atom.workspace.getActiveTextEditor();
+  if (isUsableAtomTextEditor(activeEditor)) return activeEditor;
+
+  const activePaneItem = atom.workspace.getActivePaneItem && atom.workspace.getActivePaneItem();
+  if (isUsableAtomTextEditor(activePaneItem)) {
+    _lastActiveTextEditor = activePaneItem;
+    return activePaneItem;
+  }
+
+  if (isUsableAtomTextEditor(_lastActiveTextEditor)) {
+    return _lastActiveTextEditor;
+  }
+
+  const editors = atom.workspace.getTextEditors ? atom.workspace.getTextEditors() : [];
+  return editors.find(isUsableAtomTextEditor) || undefined;
+}
+
+function _withActiveTextEditorOverride(editor, callback) {
+  const previous = _activeTextEditorOverride;
+  if (isUsableAtomTextEditor(editor)) {
+    _activeTextEditorOverride = editor;
+    _lastActiveTextEditor = editor;
+  }
+
+  let result;
+  try {
+    result = callback();
+  } catch (e) {
+    _activeTextEditorOverride = previous;
+    throw e;
+  }
+
+  if (result && typeof result.then === 'function') {
+    return result.finally(() => {
+      _activeTextEditorOverride = previous;
+    });
+  }
+
+  _activeTextEditorOverride = previous;
+  return result;
+}
+
 module.exports = {
-  get activeTextEditor() { return wrapEditor(atom.workspace.getActiveTextEditor()); },
+  get activeTextEditor() { return wrapEditor(getActiveAtomTextEditor()); },
   get visibleTextEditors() { return atom.workspace.getTextEditors().map(wrapEditor); },
   get activeTerminal() { return _activeTerminal; },
   get terminals() { return _terminals.slice(); },
@@ -1052,5 +1116,6 @@ module.exports = {
   onDidChangeNotebookEditorVisibleRanges: _onDidChangeNotebookEditorVisibleRanges.event,
 
   consumeStatusBar,
-  _init
+  _init,
+  _withActiveTextEditorOverride
 };

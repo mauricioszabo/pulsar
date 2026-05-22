@@ -2,7 +2,7 @@
 
 const { EventEmitter } = require('../types/event-emitter');
 const { Uri } = require('../types/uri');
-const { getTextDocument } = require('../types/text-document');
+const { getTextDocument, forgetTextDocument } = require('../types/text-document');
 const { WorkspaceEdit } = require('../types/workspace-edit');
 const { FileSystemWatcher } = require('../types/file-system-watcher');
 const { Disposable } = require('../types/disposable');
@@ -124,7 +124,20 @@ function _init() {
   _initialized = true;
 
   atom.workspace.observeTextEditors(editor => {
-    _onDidOpenTextDocument.fire(getTextDocument(editor));
+    const document = getTextDocument(editor);
+    let lastLanguageId = document && document.languageId;
+    _onDidOpenTextDocument.fire(document);
+
+    if (typeof editor.onDidChangeGrammar === 'function') {
+      editor.onDidChangeGrammar(() => {
+        const changedDocument = getTextDocument(editor);
+        const nextLanguageId = changedDocument && changedDocument.languageId;
+        if (nextLanguageId && nextLanguageId !== lastLanguageId) {
+          lastLanguageId = nextLanguageId;
+          _onDidOpenTextDocument.fire(changedDocument);
+        }
+      });
+    }
 
     editor.onDidChange(changes => {
       _onDidChangeTextDocument.fire({
@@ -146,7 +159,9 @@ function _init() {
     });
 
     editor.onDidDestroy(() => {
-      _onDidCloseTextDocument.fire(getTextDocument(editor));
+      const closedDocument = getTextDocument(editor);
+      _onDidCloseTextDocument.fire(closedDocument);
+      forgetTextDocument(editor, closedDocument);
     });
   });
 

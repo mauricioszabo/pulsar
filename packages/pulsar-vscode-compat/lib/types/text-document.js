@@ -20,20 +20,63 @@ class TextLine {
 }
 
 const textDocumentsByEditor = new WeakMap();
+const textDocumentsByBuffer = new WeakMap();
+
+function editorBuffer(atomEditor) {
+  try {
+    return atomEditor && atomEditor.getBuffer ? atomEditor.getBuffer() : undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function rememberTextDocument(atomEditor, document) {
+  if (!atomEditor || !document) return document;
+  textDocumentsByEditor.set(atomEditor, document);
+  const buffer = editorBuffer(atomEditor);
+  if (buffer) textDocumentsByBuffer.set(buffer, document);
+  return document;
+}
+
+function forgetTextDocument(atomEditor, document) {
+  if (!atomEditor) return;
+  textDocumentsByEditor.delete(atomEditor);
+
+  const buffer = editorBuffer(atomEditor);
+  if (buffer && (!document || textDocumentsByBuffer.get(buffer) === document)) {
+    textDocumentsByBuffer.delete(buffer);
+  }
+}
 
 function getTextDocument(atomEditor) {
   if (!atomEditor) return undefined;
-  let document = textDocumentsByEditor.get(atomEditor);
-  if (!document) {
-    document = new TextDocument(atomEditor);
-    textDocumentsByEditor.set(atomEditor, document);
-  }
-  return document;
+
+  const byEditor = textDocumentsByEditor.get(atomEditor);
+  if (byEditor) return byEditor;
+
+  const buffer = editorBuffer(atomEditor);
+  const byBuffer = buffer && textDocumentsByBuffer.get(buffer);
+  if (byBuffer) return rememberTextDocument(atomEditor, byBuffer);
+
+  return rememberTextDocument(atomEditor, new TextDocument(atomEditor));
 }
 
 class TextDocument {
   constructor(atomEditor) {
+    if (!atomEditor) {
+      this._editor = atomEditor;
+      return;
+    }
+
+    const byEditor = textDocumentsByEditor.get(atomEditor);
+    if (byEditor) return byEditor;
+
+    const buffer = editorBuffer(atomEditor);
+    const byBuffer = buffer && textDocumentsByBuffer.get(buffer);
+    if (byBuffer) return rememberTextDocument(atomEditor, byBuffer);
+
     this._editor = atomEditor;
+    rememberTextDocument(atomEditor, this);
   }
 
   get uri() {
@@ -44,7 +87,24 @@ class TextDocument {
   get fileName() { return this._editor.getPath() || ''; }
   get isUntitled() { return !this._editor.getPath(); }
   get languageId() { return grammarToLanguageId(this._editor.getGrammar()); }
-  get version() { return this._editor.getBuffer().changeCount; }
+
+  get version() {
+    const buffer = this._editor.getBuffer && this._editor.getBuffer();
+    const changeCount = buffer && buffer.changeCount;
+
+    // VS Code TextDocument versions are positive numbers. vscode-languageclient's
+    // code2ProtocolConverter also treats a falsy version as "not a document" when
+    // it needs to send a full textDocument/didChange notification, so Atom's
+    // initial changeCount of 0 would make full-sync didChange conversion throw
+    // "Unsupported text document change parameter" before the notification even
+    // reaches the language server.
+    if (typeof changeCount === 'number' && Number.isFinite(changeCount)) {
+      return changeCount + 1;
+    }
+
+    return 1;
+  }
+
   get isDirty() { return this._editor.isModified(); }
   get isClosed() { return this._editor.isDestroyed(); }
   get lineCount() { return this._editor.getLineCount(); }
@@ -148,4 +208,4 @@ function grammarToLanguageId(grammar) {
   return nameMap[scope] || scope.replace(/^(source|text)\./, '').replace(/\./g, '-');
 }
 
-module.exports = { TextDocument, TextLine, TextDocumentSaveReason, EndOfLine, grammarToLanguageId, getTextDocument };
+module.exports = { TextDocument, TextLine, TextDocumentSaveReason, EndOfLine, grammarToLanguageId, getTextDocument, forgetTextDocument };
