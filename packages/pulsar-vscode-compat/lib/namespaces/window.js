@@ -732,7 +732,7 @@ function createTerminalElement(terminal) {
   const output = document.createElement('pre');
   output.classList.add('pulsar-vscode-compat-terminal');
   output.tabIndex = 0;
-  output.style.cssText = 'flex:1;height:100%;overflow:auto;margin:0;padding:8px;background:transparent;color:inherit;font-family:var(--editor-font-family,monospace);font-size:var(--editor-font-size,12px);white-space:pre-wrap;outline:none;';
+  output.style.cssText = 'flex:1;height:100%;overflow:auto;margin:0;padding:8px 8px 32px;background:transparent;color:inherit;font-family:var(--editor-font-family,monospace);font-size:var(--editor-font-size,12px);white-space:pre-wrap;outline:none;';
   output.addEventListener('keydown', event => {
     if (!terminal._pty || typeof terminal._pty.handleInput !== 'function') return;
     if (event.key === 'Enter') terminal._pty.handleInput('\r');

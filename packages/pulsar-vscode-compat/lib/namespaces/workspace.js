@@ -26,6 +26,15 @@ const _onWillCreateFiles = new EventEmitter();
 const _onWillDeleteFiles = new EventEmitter();
 const _onWillRenameFiles = new EventEmitter();
 
+// Defaults for VSCode's built-in configuration keys that extensions commonly
+// read. These keys do not come from any extension manifest, but VSCode still
+// provides stable values for them. Returning undefined can break extensions that
+// feed these values into parser/formatter code during activation.
+const VS_CODE_CONFIGURATION_DEFAULTS = Object.freeze({
+  'editor.maxTokenizationLineLength': 20000,
+  'editor.rulers': []
+});
+
 // Virtual document content providers: scheme → provider
 const contentProviders = new Map();
 
@@ -96,6 +105,10 @@ function loadConfigurationDefaults() {
 }
 
 function getConfigurationDefault(fullKey) {
+  if (Object.prototype.hasOwnProperty.call(VS_CODE_CONFIGURATION_DEFAULTS, fullKey)) {
+    return cloneDefaultValue(VS_CODE_CONFIGURATION_DEFAULTS[fullKey]);
+  }
+
   const defaults = loadConfigurationDefaults();
   if (!defaults.has(fullKey)) return undefined;
   return cloneDefaultValue(defaults.get(fullKey));
@@ -394,7 +407,14 @@ class WorkspaceConfiguration {
   inspect(key) {
     const fullKey = this._section ? `${this._section}.${key}` : key;
     const val = atom.config.get(fullKey);
-    return { key: fullKey, globalValue: val, defaultValue: getConfigurationDefault(fullKey), workspaceValue: undefined };
+    return {
+      key: fullKey,
+      globalValue: val,
+      defaultValue: getConfigurationDefault(fullKey),
+      workspaceValue: undefined,
+      workspaceFolderValue: undefined,
+      languageIds: []
+    };
   }
 
   async update(key, value, target) {

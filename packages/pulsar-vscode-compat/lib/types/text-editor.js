@@ -19,12 +19,64 @@ const TextEditorSelectionChangeKind = Object.freeze({ Keyboard: 1, Mouse: 2, Com
 const OverviewRulerLane = Object.freeze({ Left: 1, Center: 2, Right: 4, Full: 7 });
 const DecorationRangeBehavior = Object.freeze({ OpenOpen: 0, ClosedClosed: 1, OpenClosed: 2, ClosedOpen: 3 });
 
+// Per atom editor, we keep the set of marker layers we've created for
+// VSCode-style decoration types so the × close button can destroy
+// overlapping markers across *all* compat-managed layers on that editor
+// (e.g. dismissing the popup also kills the paired selection highlight).
+const _compatLayersByAtomEditor = new WeakMap();
+
+function _registerCompatLayer(atomEditor, layer) {
+  let set = _compatLayersByAtomEditor.get(atomEditor);
+  if (!set) {
+    set = new Set();
+    _compatLayersByAtomEditor.set(atomEditor, set);
+  }
+  set.add(layer);
+  layer.onDidDestroy && layer.onDidDestroy(() => set.delete(layer));
+}
+
+function _normalizeRange(range) {
+  if (!range) return null;
+  if (range instanceof Range) return range;
+  const s = range.start;
+  const e = range.end || range.start;
+  if (!s || !e) return null;
+  const sLine = (s.line !== undefined) ? s.line : s.row;
+  const sChar = (s.character !== undefined) ? s.character : s.column;
+  const eLine = (e.line !== undefined) ? e.line : e.row;
+  const eChar = (e.character !== undefined) ? e.character : e.column;
+  if (sLine === undefined || sChar === undefined || eLine === undefined || eChar === undefined) return null;
+  return new Range(new Position(sLine, sChar), new Position(eLine, eChar));
+}
+
 class TextEditorDecorationType {
   constructor(options, styleElement) {
     this._options = options;
     this._styleElement = styleElement;
     this._className = styleElement ? styleElement.dataset.decorationClass : undefined;
     this._disposed = false;
+    // One Atom marker layer per atom editor this type is applied to. The
+    // layer IS our authoritative state — `setDecorations` clears it and
+    // refills; dispose destroys it.
+    this._layersByAtomEditor = new WeakMap();
+    // Weak iteration isn't possible, so also keep a strong set for dispose.
+    this._atomEditors = new Set();
+  }
+
+  _layerFor(atomEditor) {
+    let layer = this._layersByAtomEditor.get(atomEditor);
+    if (layer && !layer.isDestroyed()) return layer;
+    layer = atomEditor.addMarkerLayer({ maintainHistory: false });
+    this._layersByAtomEditor.set(atomEditor, layer);
+    this._atomEditors.add(atomEditor);
+    _registerCompatLayer(atomEditor, layer);
+    layer.onDidDestroy(() => {
+      this._atomEditors.delete(atomEditor);
+      if (this._layersByAtomEditor.get(atomEditor) === layer) {
+        this._layersByAtomEditor.delete(atomEditor);
+      }
+    });
+    return layer;
   }
 
   dispose() {
@@ -33,11 +85,11 @@ class TextEditorDecorationType {
     if (this._styleElement && this._styleElement.parentNode) {
       this._styleElement.parentNode.removeChild(this._styleElement);
     }
-    // Destroy all associated decorations tracked globally
-    if (this._decorations) {
-      for (const d of this._decorations) { try { d.destroy(); } catch (e) {} }
-      this._decorations = [];
+    for (const atomEditor of this._atomEditors) {
+      const layer = this._layersByAtomEditor.get(atomEditor);
+      if (layer && !layer.isDestroyed()) layer.destroy();
     }
+    this._atomEditors.clear();
   }
 }
 
@@ -82,7 +134,6 @@ class TextEditor {
   constructor(atomEditor) {
     this._editor = atomEditor;
     this._document = getTextDocument(atomEditor);
-    this._decorationMap = new Map(); // TextEditorDecorationType → Decoration[]
   }
 
   get document() {
@@ -154,44 +205,70 @@ class TextEditor {
   }
 
   setDecorations(decorationType, rangesOrOptions) {
-    // Remove existing decorations for this type
-    const existing = this._decorationMap.get(decorationType) || [];
-    for (const d of existing) { try { d.destroy(); } catch (e) {} }
+    if (decorationType._disposed) return;
+    const atomEditor = this._editor;
+    const layer = decorationType._layerFor(atomEditor);
 
-    const newDecorations = [];
+    // Atom's marker layer is the authoritative state. Clear wipes every
+    // marker + decoration in one call; destroyed markers stay destroyed.
+    layer.clear();
+
     const items = Array.isArray(rangesOrOptions) ? rangesOrOptions : [];
 
     for (const item of items) {
-      let range, hoverMessage, renderOptions;
-      if (item instanceof Range) {
-        range = item;
+      let rawRange, hoverMessage, renderOptions;
+      if (item instanceof Range || (item && item.start && !item.range)) {
+        rawRange = item;
       } else if (item && item.range) {
-        range = item.range;
+        rawRange = item.range;
         hoverMessage = item.hoverMessage;
         renderOptions = item.renderOptions;
       } else {
         continue;
       }
 
-      const marker = this._editor.markBufferRange(range.toAtomRange(), { invalidate: 'never' });
+      const range = _normalizeRange(rawRange);
+      if (!range) continue;
+
+      const marker = layer.markBufferRange(range.toAtomRange(), { invalidate: 'never' });
       const props = { type: 'highlight', class: decorationType._className };
       if (decorationType._options && decorationType._options.isWholeLine) {
         props.type = 'line';
       }
-      const decoration = this._editor.decorateMarker(marker, props);
-      const disposables = [{ destroy() { marker.destroy(); } }];
+      atomEditor.decorateMarker(marker, props);
 
       const afterOptions = (renderOptions && renderOptions.after) || (decorationType._options && decorationType._options.after);
       if (afterOptions && afterOptions.contentText) {
-        const overlayMarker = this._editor.markBufferRange(endPointRange(range), { invalidate: 'touch' });
-        const overlayElement = createAfterDecorationElement(afterOptions, () => overlayMarker.destroy());
-        this._editor.decorateMarker(overlayMarker, {
+        // Overlay needs its own marker (different invalidation behavior and
+        // a zero-width position at the end of the range). Live on the same
+        // layer so layer.clear()/destroy() takes it down too.
+        const overlayMarker = layer.markBufferRange(endPointRange(range), { invalidate: 'touch' });
+        const onClose = () => {
+          // × destroys the popup + the highlight marker, plus any overlapping
+          // markers from this editor's other compat layers (e.g. Calva's
+          // selection-background decoration paired with this popup). Atom
+          // guarantees a destroyed marker never resurrects.
+          const overlapRange = marker.getBufferRange();
+          const compatLayers = _compatLayersByAtomEditor.get(atomEditor);
+          if (compatLayers) {
+            for (const otherLayer of compatLayers) {
+              if (otherLayer.isDestroyed && otherLayer.isDestroyed()) continue;
+              const hits = otherLayer.findMarkers
+                ? otherLayer.findMarkers({ intersectsBufferRange: overlapRange })
+                : [];
+              for (const m of hits) { try { m.destroy(); } catch (e) {} }
+            }
+          }
+          if (!marker.isDestroyed()) marker.destroy();
+          if (!overlayMarker.isDestroyed()) overlayMarker.destroy();
+        };
+        const overlayElement = createAfterDecorationElement(afterOptions, onClose);
+        atomEditor.decorateMarker(overlayMarker, {
           type: 'overlay',
           position: 'tail',
           item: overlayElement,
           avoidOverflow: false
         });
-        disposables.push({ destroy() { overlayMarker.destroy(); } });
       }
 
       if (hoverMessage) {
@@ -200,13 +277,7 @@ class TextEditor {
           if (text) marker.getProperties().title = text;
         } catch (e) {}
       }
-
-      newDecorations.push({ destroy() { for (const d of disposables) d.destroy(); } });
     }
-
-    this._decorationMap.set(decorationType, newDecorations);
-    if (!decorationType._decorations) decorationType._decorations = [];
-    decorationType._decorations.push(...newDecorations);
   }
 
   revealRange(range, revealType) {

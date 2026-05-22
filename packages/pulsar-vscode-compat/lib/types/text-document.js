@@ -67,8 +67,20 @@ class TextDocument {
   }
 
   get uri() {
+    // Cache the Uri instance and invalidate only when the path changes.
+    // Extensions sometimes compare uris with `==` (object identity), so
+    // returning a fresh Uri on every access breaks those code paths — e.g.
+    // Calva's onDidChangeTextDocument handler bails out unless
+    // activeEditor.document.uri == event.document.uri.
     const p = this._editor.getPath();
-    return p ? Uri.file(p) : Uri.from({ scheme: 'untitled', path: this._editor.getTitle() });
+    const title = p ? null : this._editor.getTitle();
+    if (this._cachedUri && this._cachedUriPath === p && this._cachedUriTitle === title) {
+      return this._cachedUri;
+    }
+    this._cachedUri = p ? Uri.file(p) : Uri.from({ scheme: 'untitled', path: title });
+    this._cachedUriPath = p;
+    this._cachedUriTitle = title;
+    return this._cachedUri;
   }
 
   get fileName() { return this._editor.getPath() || ''; }
