@@ -72,8 +72,8 @@ class Uri {
   }
 
   static joinPath(base, ...pathSegments) {
-    const joined = [base.path, ...pathSegments].join('/').replace(/\/+/g, '/');
-    return base.with({ path: joined });
+    const joined = path.posix.join(base.path || '/', ...pathSegments.map(segment => String(segment)));
+    return base.with({ path: joined.startsWith('/') ? joined : '/' + joined });
   }
 
   static from(components) {

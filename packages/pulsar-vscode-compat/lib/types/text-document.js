@@ -19,6 +19,18 @@ class TextLine {
   }
 }
 
+const textDocumentsByEditor = new WeakMap();
+
+function getTextDocument(atomEditor) {
+  if (!atomEditor) return undefined;
+  let document = textDocumentsByEditor.get(atomEditor);
+  if (!document) {
+    document = new TextDocument(atomEditor);
+    textDocumentsByEditor.set(atomEditor, document);
+  }
+  return document;
+}
+
 class TextDocument {
   constructor(atomEditor) {
     this._editor = atomEditor;
@@ -136,4 +148,4 @@ function grammarToLanguageId(grammar) {
   return nameMap[scope] || scope.replace(/^(source|text)\./, '').replace(/\./g, '-');
 }
 
-module.exports = { TextDocument, TextLine, TextDocumentSaveReason, EndOfLine, grammarToLanguageId };
+module.exports = { TextDocument, TextLine, TextDocumentSaveReason, EndOfLine, grammarToLanguageId, getTextDocument };

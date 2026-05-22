@@ -104,6 +104,17 @@ function registerDefinitionProvider(documentSelector, provider) {
   });
 }
 
+function registerDeclarationProvider(documentSelector, provider) {
+  const symProvider = makeSymbolProvider(`vscode-declaration-${Date.now()}`, 'pulsar-vscode-compat', documentSelector, {
+    provideDefinition: provider.provideDeclaration ? provider.provideDeclaration.bind(provider) : () => null
+  });
+  symbolProviders.push(symProvider);
+  return new Disposable(() => {
+    const idx = symbolProviders.indexOf(symProvider);
+    if (idx >= 0) symbolProviders.splice(idx, 1);
+  });
+}
+
 function registerImplementationProvider(documentSelector, provider) {
   const symProvider = makeSymbolProvider(`vscode-implementation-${Date.now()}`, 'pulsar-vscode-compat', documentSelector, {
     provideDefinition: provider.provideImplementation ? provider.provideImplementation.bind(provider) : () => null
@@ -402,6 +413,7 @@ module.exports = {
   registerCompletionItemProvider,
   registerHoverProvider,
   registerDefinitionProvider,
+  registerDeclarationProvider,
   registerImplementationProvider,
   registerTypeDefinitionProvider,
   registerReferenceProvider,

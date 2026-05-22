@@ -9,6 +9,141 @@ const { Uri } = require('../types/uri');
 const { Disposable } = require('../types/disposable');
 const { CancellationTokenSource } = require('../types/cancellation');
 const path = require('path');
+const fs = require('fs');
+
+let AnsiUpClass;
+let _ansiUp;
+
+function resolveRequireableAnsiUp() {
+  try {
+    const resolved = require.resolve('ansi-up');
+    // ansi-up@1.0.0 advertises a CommonJS "main", but the file actually ends
+    // with an ESM `export { AnsiUp }`. Pulsar's CommonJS compile cache logs a
+    // noisy "Error running script" before our try/catch can handle that syntax
+    // error, so inspect the source first and only require versions that are
+    // actually CommonJS-loadable.
+    const source = fs.readFileSync(resolved, 'utf8');
+    if (/^\s*export\s+/m.test(source)) return null;
+    return resolved;
+  } catch (e) {
+    return null;
+  }
+}
+
+function getAnsiUp() {
+  if (_ansiUp) return _ansiUp;
+  if (AnsiUpClass === undefined) {
+    const resolved = resolveRequireableAnsiUp();
+    if (resolved) {
+      try {
+        const mod = require(resolved);
+        AnsiUpClass = mod.AnsiUp || mod.default || mod;
+      } catch (e) {
+        AnsiUpClass = null;
+      }
+    } else {
+      AnsiUpClass = null;
+    }
+  }
+  if (AnsiUpClass) {
+    try {
+      _ansiUp = new AnsiUpClass();
+      // Calva output runs in an editor-themed pane, so keep the host background.
+      _ansiUp.use_classes = false;
+      _ansiUp.useClasses = false;
+      _ansiUp.escape_for_html = true;
+      _ansiUp.escapeForHtml = true;
+      return _ansiUp;
+    } catch (e) {}
+  }
+  return null;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fallbackAnsiToHtml(value) {
+  const colors = {
+    30: '#000000', 31: '#cd3131', 32: '#0dbc79', 33: '#e5e510',
+    34: '#2472c8', 35: '#bc3fbc', 36: '#11a8cd', 37: '#e5e5e5',
+    90: '#666666', 91: '#f14c4c', 92: '#23d18b', 93: '#f5f543',
+    94: '#3b8eea', 95: '#d670d6', 96: '#29b8db', 97: '#ffffff'
+  };
+  const bgColors = {
+    40: '#000000', 41: '#cd3131', 42: '#0dbc79', 43: '#e5e510',
+    44: '#2472c8', 45: '#bc3fbc', 46: '#11a8cd', 47: '#e5e5e5',
+    100: '#666666', 101: '#f14c4c', 102: '#23d18b', 103: '#f5f543',
+    104: '#3b8eea', 105: '#d670d6', 106: '#29b8db', 107: '#ffffff'
+  };
+  const state = { bold: false, italic: false, underline: false, foreground: null, background: null };
+  let html = '';
+  let open = false;
+  const close = () => { if (open) { html += '</span>'; open = false; } };
+  const style = () => {
+    const parts = [];
+    if (state.bold) parts.push('font-weight:bold');
+    if (state.italic) parts.push('font-style:italic');
+    if (state.underline) parts.push('text-decoration:underline');
+    if (state.foreground) parts.push(`color:${state.foreground}`);
+    if (state.background) parts.push(`background-color:${state.background}`);
+    return parts.join(';');
+  };
+  const openSpan = () => {
+    const css = style();
+    if (css) { html += `<span style="${css}">`; open = true; }
+  };
+  String(value).split(/\x1b\[([0-9;]*)m/g).forEach((part, index) => {
+    if (index % 2 === 0) {
+      html += escapeHtml(part);
+      return;
+    }
+    close();
+    const codes = part === '' ? [0] : part.split(';').map(code => Number(code || 0));
+    for (const code of codes) {
+      if (code === 0) {
+        state.bold = false; state.italic = false; state.underline = false;
+        state.foreground = null; state.background = null;
+      } else if (code === 1) state.bold = true;
+      else if (code === 3) state.italic = true;
+      else if (code === 4) state.underline = true;
+      else if (code === 22) state.bold = false;
+      else if (code === 23) state.italic = false;
+      else if (code === 24) state.underline = false;
+      else if (code === 39) state.foreground = null;
+      else if (code === 49) state.background = null;
+      else if (colors[code]) state.foreground = colors[code];
+      else if (bgColors[code]) state.background = bgColors[code];
+    }
+    openSpan();
+  });
+  close();
+  return html;
+}
+
+function terminalAnsiToHtml(value) {
+  const ansiUp = getAnsiUp();
+  if (ansiUp && typeof ansiUp.ansi_to_html === 'function') {
+    return ansiUp.ansi_to_html(value);
+  }
+  if (ansiUp && typeof ansiUp.ansiToHtml === 'function') {
+    return ansiUp.ansiToHtml(value);
+  }
+  return fallbackAnsiToHtml(value);
+}
+
+function stripUnsupportedTerminalSequences(value) {
+  return String(value)
+    // OSC sequences, including title-setting sequences, are not display text.
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    // Drop non-SGR CSI sequences that ansi-up does not render as colors/styles.
+    .replace(/\x1b\[(?![0-9;]*m)[0-?]*[ -/]*[@-~]/g, '');
+}
 
 const _onDidChangeActiveTextEditor = new EventEmitter();
 const _onDidChangeVisibleTextEditors = new EventEmitter();
@@ -30,6 +165,11 @@ const _onDidChangTextEditorViewColumn = new EventEmitter();
 let _statusBarService = null;
 let _initialized = false;
 let _decorationCounter = 0;
+let _terminalCounter = 0;
+let _activeTerminal = undefined;
+const _terminals = [];
+const _terminalItemsByUri = new Map();
+let _terminalOpenerDisposable = null;
 
 function _init() {
   if (_initialized) return;
@@ -73,19 +213,49 @@ async function showTextDocument(documentOrUri, optionsOrColumn, preserveFocus) {
   return wrapEditor(editor);
 }
 
+function _messageText(value) {
+  if (value instanceof Error) return value.message || String(value);
+  if (typeof value === 'string') return value;
+  if (value && typeof value.message === 'string') return value.message;
+  return String(value);
+}
+
+function _messageDetail(value) {
+  if (value instanceof Error) return value.stack || value.message || String(value);
+  if (value && typeof value.stack === 'string') return value.stack;
+  if (value && typeof value.message === 'string') return value.message;
+  return undefined;
+}
+
 // --- Notifications (Promise-based with button items) ---
 function _showMessage(type, message, ...rest) {
   let items, options;
-  if (rest.length && typeof rest[0] === 'object' && !Array.isArray(rest[0])) {
+  if (rest.length && typeof rest[0] === 'object' && !Array.isArray(rest[0]) && !(rest[0] instanceof Error) && !rest[0].message && !rest[0].title && (rest[0].modal !== undefined || rest[0].detail !== undefined)) {
     options = rest[0];
     items = rest.slice(1);
   } else {
     items = rest;
     options = {};
   }
-  const buttons = items.map(item => {
+
+  const details = [];
+  const buttonItems = [];
+  for (const item of items) {
+    if (item instanceof Error || (item && typeof item === 'object' && item.message && !item.title)) {
+      const detail = _messageDetail(item);
+      if (detail) details.push(detail);
+    } else {
+      buttonItems.push(item);
+    }
+  }
+
+  const messageText = _messageText(message);
+  const messageDetail = _messageDetail(message);
+  if (messageDetail && messageDetail !== messageText) details.unshift(messageDetail);
+
+  const buttons = buttonItems.map(item => {
     const label = typeof item === 'string' ? item : item.title || String(item);
-    return { text: label };
+    return { text: label, item };
   });
 
   return new Promise(resolve => {
@@ -93,13 +263,15 @@ function _showMessage(type, message, ...rest) {
     if (buttons.length) {
       notifOpts.buttons = buttons.map(b => ({
         text: b.text,
-        onDidClick: () => { notif.dismiss(); resolve(b.text); }
+        onDidClick: () => { notif.dismiss(); resolve(b.item); }
       }));
     }
-    if (options.detail) notifOpts.detail = options.detail;
+    const optionDetail = options.detail ? _messageText(options.detail) : undefined;
+    const allDetails = [...(optionDetail ? [optionDetail] : []), ...details].filter(Boolean);
+    if (allDetails.length) notifOpts.detail = allDetails.join('\n\n');
     if (options.modal) notifOpts.dismissable = true;
 
-    const notif = atom.notifications[`add${type}`](message, notifOpts);
+    const notif = atom.notifications[`add${type}`](messageText, notifOpts);
     if (!buttons.length) resolve(undefined);
     notif.onDidDismiss(() => resolve(undefined));
   });
@@ -115,7 +287,12 @@ function showQuickPick(items, options) {
     const resolvedItems = Promise.resolve(typeof items === 'function' ? items() : items);
     resolvedItems.then(resolvedList => {
       const list = resolvedList || [];
-      const { SelectListView } = (() => { try { return require('atom-select-list'); } catch(e) { return {}; } })();
+      const SelectListView = (() => {
+        try {
+          const mod = require('atom-select-list');
+          return mod.SelectListView || mod.default || mod;
+        } catch(e) { return null; }
+      })();
       if (!SelectListView) { resolve(undefined); return; }
 
       const isMulti = options && options.canPickMany;
@@ -357,18 +534,245 @@ function createStatusBarItem(alignmentOrId, priority) {
 
 // --- Terminal ---
 function createTerminal(options) {
-  // Stub — returns a fake terminal object
+  ensureTerminalOpener();
+  const terminal = new CompatTerminal(normalizeTerminalOptions(...arguments));
+  _terminals.push(terminal);
+  _terminalItemsByUri.set(terminal._uri, terminal._item);
+  _activeTerminal = terminal;
+  _onDidOpenTerminal.fire(terminal);
+
+  // VSCode terminals are often shown explicitly later, but Calva's pseudo-terminal
+  // is user-facing output. In Pulsar, creating the pane without opening it makes the
+  // terminal effectively invisible, so reveal it immediately unless the extension
+  // explicitly asked for a hidden terminal.
+  if (!terminal.creationOptions.hideFromUser) {
+    terminal.show(true);
+  }
+
+  return terminal;
+}
+
+function normalizeTerminalOptions(options, shellPath, shellArgs) {
+  if (typeof options === 'string') {
+    return { name: options, shellPath, shellArgs };
+  }
+  return options || {};
+}
+
+function ensureTerminalOpener() {
+  if (_terminalOpenerDisposable) return;
+  _terminalOpenerDisposable = atom.workspace.addOpener(uri => {
+    const value = typeof uri === 'string' ? uri : uri && uri.toString ? uri.toString() : String(uri);
+    if (!value.startsWith('pulsar://pulsar-vscode-compat/terminal/')) return;
+    return _terminalItemsByUri.get(value);
+  });
+}
+
+class CompatTerminal {
+  constructor(options) {
+    this.name = options.name || 'Terminal';
+    this.processId = Promise.resolve(undefined);
+    this.creationOptions = options;
+    this.exitStatus = undefined;
+    this.state = { isInteractedWith: false };
+    this.shellIntegration = undefined;
+    this._id = ++_terminalCounter;
+    this._uri = `pulsar://pulsar-vscode-compat/terminal/${this._id}`;
+    this._pty = options.pty;
+    this._disposed = false;
+    this._opened = false;
+    this._content = '';
+    this._element = createTerminalElement(this);
+    this._item = createTerminalPaneItem(this);
+
+    if (this._pty && typeof this._pty.onDidWrite === 'function') {
+      this._writeDisposable = this._pty.onDidWrite(data => this._append(data));
+    }
+    if (this._pty && typeof this._pty.onDidClose === 'function') {
+      this._closeDisposable = this._pty.onDidClose(() => this.dispose());
+    }
+    if (this._pty && typeof this._pty.onDidExit === 'function') {
+      this._exitDisposable = this._pty.onDidExit(code => {
+        this.exitStatus = { code, reason: 2 };
+        _onDidChangeTerminalState.fire(this);
+      });
+    }
+  }
+
+  sendText(text, addNewLine = true) {
+    this.state.isInteractedWith = true;
+    const data = String(text) + (addNewLine === false ? '' : '\r');
+    if (this._pty && typeof this._pty.handleInput === 'function') {
+      this._pty.handleInput(data);
+    } else {
+      this._append(data.replace(/\r/g, '\n'));
+    }
+    _onDidChangeTerminalState.fire(this);
+  }
+
+  show(preserveFocus) {
+    if (this._disposed) return;
+    if (!this._opened && this._pty && typeof this._pty.open === 'function') {
+      this._opened = true;
+      try { this._pty.open(this._initialDimensions()); } catch (e) {}
+    }
+    _activeTerminal = this;
+
+    const bottomDock = atom.workspace.getBottomDock && atom.workspace.getBottomDock();
+    if (bottomDock && typeof bottomDock.show === 'function') {
+      bottomDock.show();
+    }
+
+    const opened = atom.workspace.open(this._uri, {
+      location: 'bottom',
+      activatePane: !preserveFocus,
+      activateItem: true,
+      searchAllPanes: true,
+      pending: false
+    });
+
+    Promise.resolve(opened).then(() => {
+      const dock = atom.workspace.getBottomDock && atom.workspace.getBottomDock();
+      if (dock && typeof dock.show === 'function') dock.show();
+      if (!preserveFocus) {
+        if (dock && typeof dock.activate === 'function') dock.activate();
+        this.focus();
+      }
+    }).catch(() => {});
+  }
+
+  focus() {
+    if (this._outputElement && typeof this._outputElement.focus === 'function') {
+      this._outputElement.focus();
+    }
+  }
+
+  clear() {
+    this._content = '';
+    if (this._outputElement) this._outputElement.innerHTML = '';
+  }
+
+  _initialDimensions() {
+    return { columns: 80, rows: 24 };
+  }
+
+  hide() {
+    const dock = atom.workspace.getBottomDock && atom.workspace.getBottomDock();
+    if (dock && typeof dock.hide === 'function') {
+      dock.hide();
+    }
+  }
+
+  dispose() {
+    this._dispose(true, true);
+  }
+
+  _dispose(closePty, destroyPane) {
+    if (this._disposed) return;
+    this._disposed = true;
+    try { if (this._writeDisposable) this._writeDisposable.dispose(); } catch (e) {}
+    try { if (this._closeDisposable) this._closeDisposable.dispose(); } catch (e) {}
+    try { if (this._exitDisposable) this._exitDisposable.dispose(); } catch (e) {}
+    try { if (closePty && this._pty && typeof this._pty.close === 'function') this._pty.close(); } catch (e) {}
+    _terminalItemsByUri.delete(this._uri);
+    const idx = _terminals.indexOf(this);
+    if (idx >= 0) _terminals.splice(idx, 1);
+    if (_activeTerminal === this) _activeTerminal = _terminals[_terminals.length - 1];
+    if (destroyPane) {
+      const pane = atom.workspace.paneForItem(this._item);
+      if (pane) pane.destroyItem(this._item);
+    }
+    _onDidCloseTerminal.fire(this);
+  }
+
+  _append(data) {
+    const raw = String(data);
+    if (raw.includes('\x1b[2J')) this._content = '';
+    const text = stripUnsupportedTerminalSequences(raw)
+      .replace(/\x1b\[2J\x1b\[H/g, '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+    this._content += text;
+    this._outputElement.innerHTML = terminalAnsiToHtml(this._content);
+    this._outputElement.scrollTop = this._outputElement.scrollHeight;
+  }
+}
+
+function createTerminalElement(terminal) {
+  const container = document.createElement('div');
+  container.classList.add('pulsar-vscode-compat-terminal-container');
+  container.dataset.terminalName = terminal.name;
+  container.style.cssText = 'height:100%;min-height:180px;display:flex;flex-direction:column;background:var(--terminal-background-color,var(--base-background-color,#1e1e1e));color:var(--text-color,#d4d4d4);';
+
+  const toolbar = document.createElement('div');
+  toolbar.classList.add('pulsar-vscode-compat-terminal-toolbar');
+  toolbar.style.cssText = 'display:flex;align-items:center;gap:4px;min-height:28px;padding:2px 6px;border-bottom:1px solid var(--base-border-color,#333);background:var(--tool-panel-background-color,var(--base-background-color,#252526));user-select:none;';
+
+  const title = document.createElement('span');
+  title.textContent = terminal.name;
+  title.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;opacity:0.85;';
+  toolbar.appendChild(title);
+
+  toolbar.appendChild(createTerminalToolbarButton('↻', 'Clear Terminal', () => terminal.clear()));
+  toolbar.appendChild(createTerminalToolbarButton('⌖', 'Focus Terminal', () => terminal.focus()));
+  toolbar.appendChild(createTerminalToolbarButton('—', 'Hide Terminal', () => terminal.hide()));
+  toolbar.appendChild(createTerminalToolbarButton('×', 'Close Terminal', () => terminal.dispose()));
+
+  const output = document.createElement('pre');
+  output.classList.add('pulsar-vscode-compat-terminal');
+  output.tabIndex = 0;
+  output.style.cssText = 'flex:1;height:100%;overflow:auto;margin:0;padding:8px;background:transparent;color:inherit;font-family:var(--editor-font-family,monospace);font-size:var(--editor-font-size,12px);white-space:pre-wrap;outline:none;';
+  output.addEventListener('keydown', event => {
+    if (!terminal._pty || typeof terminal._pty.handleInput !== 'function') return;
+    if (event.key === 'Enter') terminal._pty.handleInput('\r');
+    else if (event.key === 'Backspace') terminal._pty.handleInput('\x7f');
+    else if (event.key === 'c' && event.ctrlKey) terminal._pty.handleInput('\x03');
+    else if (event.key === 'l' && event.ctrlKey) terminal.clear();
+    else if (event.key.length === 1) terminal._pty.handleInput(event.key);
+    else return;
+    event.preventDefault();
+  });
+
+  terminal._outputElement = output;
+  container.appendChild(toolbar);
+  container.appendChild(output);
+  return container;
+}
+
+function createTerminalToolbarButton(label, title, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.style.cssText = 'min-width:24px;height:22px;padding:0 5px;border:1px solid transparent;border-radius:3px;background:transparent;color:inherit;opacity:0.8;cursor:pointer;font:inherit;line-height:1;';
+  button.addEventListener('mouseenter', () => {
+    button.style.background = 'var(--button-background-color,var(--background-color-highlight,#3a3d41))';
+    button.style.borderColor = 'var(--button-border-color,var(--base-border-color,#555))';
+    button.style.opacity = '1';
+  });
+  button.addEventListener('mouseleave', () => {
+    button.style.background = 'transparent';
+    button.style.borderColor = 'transparent';
+    button.style.opacity = '0.8';
+  });
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function createTerminalPaneItem(terminal) {
   return {
-    name: (options && options.name) || 'Terminal',
-    processId: Promise.resolve(undefined),
-    creationOptions: options || {},
-    exitStatus: undefined,
-    state: { isInteractedWith: false },
-    shellIntegration: undefined,
-    sendText(text, addNewLine) {},
-    show(preserveFocus) {},
-    hide() {},
-    dispose() {}
+    getTitle() { return terminal.name; },
+    getURI() { return terminal._uri; },
+    getElement() { return terminal._element; },
+    getDefaultLocation() { return 'bottom'; },
+    getAllowedLocations() { return ['bottom', 'center']; },
+    isPermanentDockItem() { return false; },
+    destroy() { terminal._dispose(true, false); }
   };
 }
 
@@ -451,7 +855,6 @@ const treeDataProviders = new Map();
 
 function registerTreeDataProvider(viewId, dataProvider) {
   treeDataProviders.set(viewId, dataProvider);
-  _createTreeDockItem(viewId, dataProvider, {});
   return new Disposable(() => treeDataProviders.delete(viewId));
 }
 
@@ -521,7 +924,7 @@ function _createTreeDockItem(viewId, provider, options) {
   }
 
   refresh();
-  atom.workspace.addLeftPanel({ item, priority: 200, visible: true });
+  atom.workspace.open(item, { location: 'left', activatePane: false, activateItem: false, searchAllPanes: true });
   return item;
 }
 
@@ -594,8 +997,8 @@ function registerFileDecorationProvider(provider) { return new Disposable(() => 
 module.exports = {
   get activeTextEditor() { return wrapEditor(atom.workspace.getActiveTextEditor()); },
   get visibleTextEditors() { return atom.workspace.getTextEditors().map(wrapEditor); },
-  get activeTerminal() { return undefined; },
-  get terminals() { return []; },
+  get activeTerminal() { return _activeTerminal; },
+  get terminals() { return _terminals.slice(); },
   get activeNotebookEditor() { return undefined; },
   get visibleNotebookEditors() { return []; },
   get tabGroups() {

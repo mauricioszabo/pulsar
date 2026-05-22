@@ -1,6 +1,11 @@
 'use strict';
 
+function _initShims() {
+  try { require('./shims/http-headers').install(); } catch (e) { console.error('[vscode-compat] http header shim init:', e); }
+}
+
 function _initNamespaces() {
+  _initShims();
   try { require('./namespaces/workspace')._init(); } catch (e) { console.error('[vscode-compat] workspace init:', e); }
   try { require('./namespaces/window')._init(); } catch (e) { console.error('[vscode-compat] window init:', e); }
 }

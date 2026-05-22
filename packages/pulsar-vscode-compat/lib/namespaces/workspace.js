@@ -2,7 +2,7 @@
 
 const { EventEmitter } = require('../types/event-emitter');
 const { Uri } = require('../types/uri');
-const { TextDocument } = require('../types/text-document');
+const { getTextDocument } = require('../types/text-document');
 const { WorkspaceEdit } = require('../types/workspace-edit');
 const { FileSystemWatcher } = require('../types/file-system-watcher');
 const { Disposable } = require('../types/disposable');
@@ -100,34 +100,53 @@ function getConfigurationDefault(fullKey) {
   return cloneDefaultValue(defaults.get(fullKey));
 }
 
+function textDocumentContentChanges(editor, changes) {
+  if (!Array.isArray(changes)) return [];
+  const buffer = editor.getBuffer && editor.getBuffer();
+  return changes.map(change => {
+    const oldRange = change.oldRange || change.range;
+    const newRange = change.newRange || oldRange;
+    const text = newRange && editor.getTextInBufferRange ? editor.getTextInBufferRange(newRange) : '';
+    const range = oldRange ? Range.fromAtomRange(oldRange) : new Range(new Position(0, 0), new Position(0, 0));
+    return {
+      range,
+      rangeOffset: oldRange && buffer && buffer.characterIndexForPosition ? buffer.characterIndexForPosition(oldRange.start) : 0,
+      rangeLength: oldRange && typeof oldRange.getExtent === 'function'
+        ? oldRange.getExtent().row === 0 ? oldRange.getExtent().column : undefined
+        : undefined,
+      text
+    };
+  });
+}
+
 function _init() {
   if (_initialized) return;
   _initialized = true;
 
   atom.workspace.observeTextEditors(editor => {
-    _onDidOpenTextDocument.fire(new TextDocument(editor));
+    _onDidOpenTextDocument.fire(getTextDocument(editor));
 
-    editor.onDidChange(() => {
+    editor.onDidChange(changes => {
       _onDidChangeTextDocument.fire({
-        document: new TextDocument(editor),
-        contentChanges: [],
+        document: getTextDocument(editor),
+        contentChanges: textDocumentContentChanges(editor, changes),
         reason: undefined
       });
     });
 
     editor.getBuffer().onWillSave(() => {
       _onWillSaveTextDocument.fire({
-        document: new TextDocument(editor),
+        document: getTextDocument(editor),
         reason: 1
       });
     });
 
     editor.getBuffer().onDidSave(() => {
-      _onDidSaveTextDocument.fire(new TextDocument(editor));
+      _onDidSaveTextDocument.fire(getTextDocument(editor));
     });
 
     editor.onDidDestroy(() => {
-      _onDidCloseTextDocument.fire(new TextDocument(editor));
+      _onDidCloseTextDocument.fire(getTextDocument(editor));
     });
   });
 
@@ -159,12 +178,12 @@ function openTextDocument(uriOrPathOrOptions) {
         const grammar = atom.grammars.grammarForScopeName(`source.${uriOrPathOrOptions.language}`);
         if (grammar) editor.setGrammar(grammar);
       }
-      return new TextDocument(editor);
+      return getTextDocument(editor);
     });
   }
 
   return atom.workspace.open(filePath, { activatePane: false, activateItem: false })
-    .then(editor => new TextDocument(editor));
+    .then(editor => getTextDocument(editor));
 }
 
 function saveAll(includeUntitled) {
@@ -501,7 +520,7 @@ module.exports = {
     return atom.project.getPaths().map((p, i) => ({ uri: Uri.file(p), name: path.basename(p), index: i }));
   },
   get isTrusted() { return true; },
-  get textDocuments() { return atom.workspace.getTextEditors().map(e => new TextDocument(e)); },
+  get textDocuments() { return atom.workspace.getTextEditors().map(e => getTextDocument(e)); },
   get notebookDocuments() { return []; },
   fs: workspaceFileSystem,
 

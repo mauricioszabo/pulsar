@@ -147,31 +147,160 @@ function createLanguageStatusItem(id, selector) { return new LanguageStatusItem(
 function createQuickPick() {
   const { EventEmitter: EE } = require('./types/event-emitter');
   const _onDidChangeValue = new EE();
+  const _onDidChangeActive = new EE();
   const _onDidChangeSelection = new EE();
   const _onDidAccept = new EE();
   const _onDidHide = new EE();
   const _onDidTriggerButton = new EE();
+  const _onDidTriggerItemButton = new EE();
 
   let _panel = null;
+  let _view = null;
+  let _hidden = false;
+  let _value = '';
+
+  const updateActiveItems = (items) => {
+    qp.activeItems = items || [];
+    _onDidChangeActive.fire(qp.activeItems);
+  };
+
+  const updateSelectedItems = (items) => {
+    qp.selectedItems = items || [];
+    _onDidChangeSelection.fire(qp.selectedItems);
+  };
+
+  const destroyPanel = () => {
+    if (_view && typeof _view.destroy === 'function') {
+      try { _view.destroy(); } catch (e) {}
+    }
+    _view = null;
+    if (_panel) {
+      try { _panel.destroy(); } catch (e) {}
+    }
+    _panel = null;
+  };
+
+  const fireHide = () => {
+    if (_hidden) return;
+    _hidden = true;
+    destroyPanel();
+    _onDidHide.fire();
+  };
+
   const qp = {
     items: [], canSelectMany: false, matchOnDescription: false, matchOnDetail: false,
     activeItems: [], selectedItems: [], value: '', placeholder: '', title: '',
     step: undefined, totalSteps: undefined, buttons: [], busy: false, enabled: true,
     ignoreFocusOut: false, keepScrollPosition: false,
     onDidChangeValue: _onDidChangeValue.event,
+    onDidChangeActive: _onDidChangeActive.event,
     onDidChangeSelection: _onDidChangeSelection.event,
     onDidAccept: _onDidAccept.event,
     onDidHide: _onDidHide.event,
     onDidTriggerButton: _onDidTriggerButton.event,
-    onDidTriggerItemButton: new EE().event,
+    onDidTriggerItemButton: _onDidTriggerItemButton.event,
     show() {
-      window.showQuickPick(qp.items, { placeHolder: qp.placeholder }).then(item => {
-        if (item) { qp.selectedItems = [item]; _onDidAccept.fire(); }
-        else _onDidHide.fire();
+      _hidden = false;
+      destroyPanel();
+      const SelectListView = (() => {
+        try {
+          const mod = require('atom-select-list');
+          return mod.SelectListView || mod.default || mod;
+        } catch(e) { return null; }
+      })();
+      if (!SelectListView) { fireHide(); return; }
+
+      const allItems = qp.items || [];
+      const initialSelectionIndex = qp.activeItems && qp.activeItems.length
+        ? Math.max(0, allItems.indexOf(qp.activeItems[0]))
+        : 0;
+      const filterKeyForItem = item => {
+        if (typeof item === 'string') return item;
+        const parts = [item.label || ''];
+        if (qp.matchOnDescription && item.description) parts.push(item.description);
+        if (qp.matchOnDetail && item.detail) parts.push(item.detail);
+        return parts.join(' ');
+      };
+
+      _view = new SelectListView({
+        items: allItems,
+        initialSelectionIndex,
+        query: qp.value || '',
+        filterKeyForItem,
+        elementForItem: (item) => {
+          const li = document.createElement('li');
+          li.classList.add('two-lines');
+          if (item && item.disabled) li.classList.add('disabled');
+          if (typeof item === 'string') {
+            li.textContent = item;
+          } else {
+            const label = document.createElement('div');
+            label.classList.add('primary-line');
+            label.textContent = item.label || '';
+            li.appendChild(label);
+            if (item.description || item.detail) {
+              const detail = document.createElement('div');
+              detail.classList.add('secondary-line');
+              detail.textContent = item.description || item.detail || '';
+              li.appendChild(detail);
+            }
+          }
+          return li;
+        },
+        didChangeQuery: (query) => {
+          qp.value = query || '';
+          if (qp.value !== _value) {
+            _value = qp.value;
+            _onDidChangeValue.fire(qp.value);
+          }
+        },
+        didChangeSelection: (item) => {
+          updateActiveItems(item ? [item] : []);
+        },
+        didConfirmSelection: (item) => {
+          if (!qp.enabled || !item || item.disabled) return;
+          updateActiveItems([item]);
+          updateSelectedItems(qp.canSelectMany ? [item] : [item]);
+          _onDidAccept.fire();
+        },
+        didConfirmEmptySelection: () => {
+          updateSelectedItems([]);
+          _onDidAccept.fire();
+        },
+        didCancelSelection: () => {
+          fireHide();
+        }
       });
+
+      const input = _view.element.querySelector('input');
+      if (input) {
+        if (qp.placeholder) input.placeholder = qp.placeholder;
+        if (qp.value) {
+          input.value = qp.value;
+          _value = qp.value;
+          if (_view.refs && _view.refs.queryEditor && _view.refs.queryEditor.getModel) {
+            try { _view.refs.queryEditor.getModel().setText(qp.value); } catch (e) {}
+          }
+        }
+      }
+
+      _panel = atom.workspace.addModalPanel({ item: _view.element });
+      const initiallyActive = qp.activeItems && qp.activeItems.length ? qp.activeItems : (allItems.length ? [allItems[0]] : []);
+      if (initiallyActive.length) updateActiveItems(initiallyActive);
+      if (qp.selectedItems && qp.selectedItems.length) updateSelectedItems(qp.selectedItems);
+      _view.focus();
     },
-    hide() { _onDidHide.fire(); },
-    dispose() {}
+    hide() { fireHide(); },
+    dispose() {
+      fireHide();
+      _onDidChangeValue.dispose();
+      _onDidChangeActive.dispose();
+      _onDidChangeSelection.dispose();
+      _onDidAccept.dispose();
+      _onDidHide.dispose();
+      _onDidTriggerButton.dispose();
+      _onDidTriggerItemButton.dispose();
+    }
   };
   return qp;
 }

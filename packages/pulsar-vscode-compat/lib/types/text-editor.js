@@ -3,7 +3,7 @@
 const { Position } = require('./position');
 const { Range } = require('./range');
 const { Selection } = require('./selection');
-const { TextDocument } = require('./text-document');
+const { getTextDocument } = require('./text-document');
 
 const ViewColumn = Object.freeze({
   Active: -1, Beside: -2, One: 1, Two: 2, Three: 3,
@@ -81,7 +81,7 @@ class TextEditorEdit {
 class TextEditor {
   constructor(atomEditor) {
     this._editor = atomEditor;
-    this._document = new TextDocument(atomEditor);
+    this._document = getTextDocument(atomEditor);
     this._decorationMap = new Map(); // TextEditorDecorationType → Decoration[]
   }
 
@@ -188,7 +188,29 @@ class TextEditor {
         props.type = 'line';
       }
       const decoration = this._editor.decorateMarker(marker, props);
-      newDecorations.push({ destroy() { marker.destroy(); } });
+      const disposables = [{ destroy() { marker.destroy(); } }];
+
+      const afterOptions = (renderOptions && renderOptions.after) || (decorationType._options && decorationType._options.after);
+      if (afterOptions && afterOptions.contentText) {
+        const overlayMarker = this._editor.markBufferRange(endPointRange(range), { invalidate: 'touch' });
+        const overlayElement = createAfterDecorationElement(afterOptions, () => overlayMarker.destroy());
+        this._editor.decorateMarker(overlayMarker, {
+          type: 'overlay',
+          position: 'tail',
+          item: overlayElement,
+          avoidOverflow: false
+        });
+        disposables.push({ destroy() { overlayMarker.destroy(); } });
+      }
+
+      if (hoverMessage) {
+        try {
+          const text = typeof hoverMessage === 'string' ? hoverMessage : hoverMessage.value || String(hoverMessage);
+          if (text) marker.getProperties().title = text;
+        } catch (e) {}
+      }
+
+      newDecorations.push({ destroy() { for (const d of disposables) d.destroy(); } });
     }
 
     this._decorationMap.set(decorationType, newDecorations);
@@ -206,6 +228,69 @@ class TextEditor {
   }
 
   hide() {}
+}
+
+function endPointRange(range) {
+  const end = range.end || range.start;
+  return [[end.line, end.character], [end.line, end.character]];
+}
+
+function createAfterDecorationElement(options, close) {
+  const el = document.createElement('span');
+  el.classList.add('vscode-after-decoration-tooltip');
+  el.style.cssText = [
+    'display:inline-flex',
+    'position:relative',
+    // Pulsar overlay decorations are positioned below the marker row by
+    // default (the same behavior autocomplete popups want). VSCode
+    // `renderOptions.after.contentText` is an inline after-decoration, so move
+    // this overlay back up by exactly one editor line.
+    'top:calc(-1 * var(--editor-line-height))',
+    'align-items:center',
+    'gap:4px',
+    'max-width:50vw',
+    'margin-left:0.5em',
+    'padding:1px 5px',
+    'border-radius:3px',
+    'background:var(--overlay-background-color,var(--base-background-color,#2d2d2d))',
+    'border:1px solid var(--base-border-color,#555)',
+    `color:${cssColor(options.color) || 'var(--text-color,inherit)'}`,
+    'font-size:0.9em',
+    'line-height:1.35',
+    'box-shadow:0 1px 4px rgba(0,0,0,0.25)',
+    'white-space:pre',
+    'overflow:hidden',
+    'text-overflow:ellipsis',
+    'vertical-align:baseline',
+    'pointer-events:auto'
+  ].join(';');
+
+  const text = document.createElement('span');
+  text.classList.add('vscode-after-decoration-tooltip-text');
+  text.textContent = String(options.contentText || '');
+  text.style.cssText = 'overflow:hidden;text-overflow:ellipsis;';
+  el.appendChild(text);
+
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = '×';
+  button.title = 'Close';
+  button.style.cssText = 'margin:0 0 0 2px;padding:0;border:0;background:transparent;color:inherit;opacity:0.75;cursor:pointer;font:inherit;line-height:1;';
+  button.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    close();
+  });
+  el.appendChild(button);
+
+  return el;
+}
+
+function cssColor(value) {
+  if (!value) return undefined;
+  if (typeof value === 'string') return value;
+  if (value.id) return `var(--${String(value.id).replace(/\./g, '-')})`;
+  return undefined;
 }
 
 module.exports = { TextEditor, TextEditorDecorationType, TextEditorEdit, ViewColumn, TextEditorRevealType, TextEditorLineNumbersStyle, TextEditorSelectionChangeKind, OverviewRulerLane, DecorationRangeBehavior };
