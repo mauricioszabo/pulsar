@@ -136,6 +136,14 @@ ipcMain.handle('setAsDefaultProtocolClient', (_, { protocol, path, args }) => {
   return app.setAsDefaultProtocolClient(protocol, path, args);
 });
 
+// In-process package-manager handler. Settings View and other renderer-side
+// callers used to spawn the `ppm` binary via `BufferedProcess`; now they
+// invoke `runCommand(args, opts)` here and get the captured stdout/stderr
+// back through the IPC reply. See `src/package-manager-cli/index.js`.
+ipcMain.handle('package-manager:run', async (_event, { args, opts }) => {
+  return require('../package-manager-cli').runCommand(args, opts ?? {});
+});
+
 // The application's singleton class.
 //
 // It's the entry point into the Pulsar application and maintains the global state

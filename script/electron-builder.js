@@ -1,6 +1,5 @@
 /* eslint-disable no-process-exit */
 const Path = require('path');
-const dedent = require('dedent');
 const FS = require('fs/promises');
 const { existsSync } = require('fs');
 const yargs = require('yargs');
@@ -8,32 +7,8 @@ const { hideBin } = require('yargs/helpers')
 const generateMetadata = require('./generate-metadata-for-builder')
 const macBundleDocumentTypes = require("./mac-bundle-document-types.js");
 
-// Ensure the user has initialized and built the `ppm` submodule before they
-// try to build the app.
-if (!existsSync(Path.join('ppm', 'bin'))) {
-  console.error(dedent`
-    \`ppm\` not detected. Please run:
-
-      git submodule update --init
-      yarn run build:apm
-  `);
-  process.exit(2);
-} else if (
-  !existsSync(
-    Path.join(
-      'ppm',
-      'bin',
-      process.platform === 'win32' ? 'node.exe' : 'node'
-    )
-  )
-) {
-  console.error(dedent`
-    \`ppm\` not built. Please run:
-
-    yarn run build:apm
-  `);
-  process.exit(2);
-}
+// The legacy `ppm` submodule check is gone — the package manager now lives in
+// `src/package-manager-cli/` and runs on Electron's bundled Node.
 
 // Monkey-patch to not remove things I explicitly didn't say to remove.
 // See: https://github.com/electron-userland/electron-builder/issues/6957
@@ -261,23 +236,6 @@ let options = {
 
   extraResources: [
     { from: 'pulsar.sh', to: `${baseName}.sh` },
-    {
-      // Be selective in what we copy over to PPM’s `bin` directory. On
-      // Windows, the contents of this entire folder will be available on the
-      // `PATH`, so we shouldn’t put stray stuff in here.
-      //
-      // Below we copy over `ppm` itself, but it might have its name changed in
-      // the process depending on the release channel.
-      filter: [
-        // Everything below `ppm`…
-        'ppm/**',
-        // …except for files inside the `bin` directory.
-        '!ppm/bin'
-      ],
-      // This somehow puts it all in the right place with the `ppm` folder
-      // intact.
-      to: 'app'
-    },
     { from: ICONS.png, to: 'pulsar.png' },
     { from: 'LICENSE.md', to: 'LICENSE.md' }
   ],
@@ -317,8 +275,7 @@ let options = {
         "from": ICONS.svg,
         "to": `${baseName}.svg`
       },
-      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}` },
-      { from: 'ppm/bin/node', to: `app/ppm/bin/node` }
+      { from: 'src/package-manager-cli/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
     ]
   },
 
@@ -350,8 +307,7 @@ let options = {
       ]
     },
     extraResources: [
-      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}` },
-      { from: 'ppm/bin/node', to: `app/ppm/bin/node` }
+      { from: 'src/package-manager-cli/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
     ]
   },
 
@@ -367,12 +323,10 @@ let options = {
     extraResources: [
       { from: ICONS.ico, to: 'pulsar.ico' },
       { from: 'resources/win/pulsar.cmd', to: `${baseName}.cmd` },
-      { from: 'resources/win/pulsar.js', to: `${baseName}.js` },
       { from: 'resources/win/NSIS_Licenses.txt', to: 'NSIS_Licenses.txt' },
-      // Copy `ppm.cmd` to the `ppm/bin` directory, possibly renaming it
-      // `ppm-next.cmd` depending on release channel.
-      { from: 'ppm/bin/ppm.cmd', to: `app/ppm/bin/${ppmBaseName}.cmd` },
-      { from: 'ppm/bin/node.exe', to: `app/ppm/bin/node.exe` },
+      // Copy the `ppm.cmd` wrapper to the `ppm/bin` directory, possibly
+      // renaming it `ppm-next.cmd` depending on release channel.
+      { from: 'src/package-manager-cli/bin/ppm.cmd', to: `app/ppm/bin/${ppmBaseName}.cmd` }
     ],
     target: [
       { target: 'nsis' },

@@ -1,8 +1,39 @@
 const _ = require('underscore-plus');
-const {BufferedProcess, CompositeDisposable, Emitter} = require('atom');
+const {CompositeDisposable, Emitter} = require('atom');
+const electron = require('electron');
 const semver = require('semver');
 
 const Client = require('./atom-io-client');
+
+// Drop-in replacement for the previous BufferedProcess workflow. Instead
+// of spawning the `ppm` binary, we ask the main process to run the
+// command in-process via the `package-manager:run` IPC handler.
+class IpcProcess {
+  constructor({args, opts = {}, stdout, stderr, exit}) {
+    this._stdout = stdout;
+    this._stderr = stderr;
+    this._exit = exit;
+    this._errHandlers = [];
+    electron.ipcRenderer.invoke('package-manager:run', { args, opts })
+      .then(result => {
+        if (result.stdout && typeof this._stdout === 'function') this._stdout(result.stdout);
+        if (result.stderr && typeof this._stderr === 'function') this._stderr(result.stderr);
+        if (typeof this._exit === 'function') this._exit(result.code);
+      })
+      .catch(error => {
+        for (const handler of this._errHandlers) {
+          let handled = false;
+          handler({ error, handle: () => { handled = true; } });
+          if (handled) return;
+        }
+        if (typeof this._exit === 'function') this._exit(1);
+      });
+  }
+  onWillThrowError(callback) {
+    this._errHandlers.push(callback);
+    return { dispose: () => { this._errHandlers = this._errHandlers.filter(h => h !== callback); } };
+  }
+}
 
 module.exports = class PackageManager {
   constructor() {
@@ -77,26 +108,28 @@ module.exports = class PackageManager {
   }
 
   runCommand(args, callback) {
-    const command = atom.packages.getApmPath();
     const outputLines = [];
-    const stdout = lines => outputLines.push(lines);
+    const stdout = chunk => outputLines.push(chunk);
     const errorLines = [];
-    const stderr = lines => errorLines.push(lines);
-    const exit = code => callback(code, outputLines.join('\n'), errorLines.join('\n'));
+    const stderr = chunk => errorLines.push(chunk);
+    const exit = code => callback(code, outputLines.join(''), errorLines.join(''));
 
-    args.push('--no-color');
+    args = [...args, '--no-color'];
+    const opts = { useProxy: atom.config.get('core.useProxySettingsWhenCallingApm') };
 
-    if (atom.config.get('core.useProxySettingsWhenCallingApm')) {
-      const bufferedProcess = new BufferedProcess({command, args, stdout, stderr, exit, autoStart: false});
+    if (opts.useProxy) {
+      const start = () => new IpcProcess({ args, opts, stdout, stderr, exit });
       if (atom.resolveProxy != null) {
-        this.setProxyServersAsync(() => bufferedProcess.start());
+        this.setProxyServersAsync(start);
       } else {
-        this.setProxyServers(() => bufferedProcess.start());
+        this.setProxyServers(start);
       }
-      return bufferedProcess;
-    } else {
-      return new BufferedProcess({command, args, stdout, stderr, exit});
+      // The proxy handshake runs asynchronously; the IpcProcess will be
+      // created from the callback. Return a stub with the same shape so
+      // call sites that wire `onWillThrowError` keep working.
+      return { onWillThrowError: () => ({ dispose() {} }) };
     }
+    return new IpcProcess({ args, opts, stdout, stderr, exit });
   }
 
   loadInstalled(callback) {

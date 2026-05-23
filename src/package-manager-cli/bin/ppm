@@ -1,0 +1,37 @@
+#!/bin/sh
+# Pulsar package manager shim. Invokes `pulsar -p "$@"` so the package
+# manager runs in-process inside the Pulsar main process, on Electron's Node.
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+
+# The channel matches the basename of this script: ppm -> pulsar, ppm-next -> pulsar-next.
+case "$(basename "$0")" in
+  ppm-next) EXE=pulsar-next ;;
+  *)        EXE=pulsar ;;
+esac
+
+# Locate the Pulsar executable relative to this wrapper.
+# Possible layouts (DIR is the directory of this script):
+#   macOS installed:    Contents/Resources/app/ppm/bin -> Contents/MacOS/<Display>
+#   Linux installed:    resources/app/ppm/bin -> <root>/<exe>
+#   Source tree:        src/package-manager-cli/bin -> <root>/pulsar (rare; mostly used by the dist path)
+BIN=""
+if [ -d "$DIR/../../../../MacOS" ]; then
+  # macOS .app bundle. The display name may differ from "Pulsar"; pick the first executable file there.
+  for candidate in "$DIR/../../../../MacOS"/*; do
+    if [ -x "$candidate" ] && [ -f "$candidate" ]; then BIN="$candidate"; break; fi
+  done
+fi
+if [ -z "$BIN" ] && [ -x "$DIR/../../../../$EXE" ]; then
+  BIN="$DIR/../../../../$EXE"
+fi
+if [ -z "$BIN" ] && [ -x "$DIR/../../../$EXE" ]; then
+  BIN="$DIR/../../../$EXE"
+fi
+
+if [ -z "$BIN" ]; then
+  echo "ppm: cannot locate the Pulsar executable from $DIR" >&2
+  exit 1
+fi
+
+exec "$BIN" -p "$@"

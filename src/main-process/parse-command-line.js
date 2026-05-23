@@ -152,20 +152,25 @@ module.exports = function parseCommandLine(processArgs) {
   let args = options.argv;
 
   if (args['package']) {
-    const PackageManager = require('../package-manager');
-    const cp = require('child_process');
-    const ppmPath = PackageManager.possibleApmPaths(version);
-
-    let ppmArgs = [...processArgs]
-    while (true) {
-      // Silently discard all arguments up to (and including) `--package`/`-p`.
+    // Strip everything up to and including the `-p`/`--package` flag,
+    // mirroring the trimming that the legacy shell wrapper used to do.
+    const ppmArgs = [...processArgs];
+    while (ppmArgs.length) {
       const arg = ppmArgs.shift();
-      if (arg === '-p' || arg === '--package' || ppmArgs.length === 0) {
-        break;
-      }
+      if (arg === '-p' || arg === '--package') break;
     }
-    const exitCode = cp.spawnSync(ppmPath, ppmArgs, { stdio: 'inherit' }).status;
-    process.exit(exitCode);
+
+    // Mark the package-mode invocation so neither the renderer nor any
+    // spawned sub-process accidentally re-enters this branch.
+    process.env.PULSAR_PACKAGE_MODE = '1';
+
+    // Run the package manager in this same Electron main process — no
+    // child Node, no separate npm CLI. The new in-process module lives at
+    // `src/package-manager-cli/` and exposes `runCli(argv) -> Promise<exitCode>`.
+    require('../package-manager-cli').runCli(ppmArgs).then(
+      code => process.exit(code ?? 0),
+      err => { console.error(err?.stack || err?.message || err); process.exit(1); }
+    );
     return;
   }
 
