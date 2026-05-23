@@ -211,26 +211,32 @@ function _ensureTextDocument(editor) {
 }
 
 function openTextDocument(uriOrPathOrOptions) {
+  // VSCode's workspace.openTextDocument creates an in-memory TextDocument
+  // model without opening a visible editor — display only happens via
+  // window.showTextDocument. atom.workspace.open always attaches the editor
+  // to a pane (the {activatePane:false} flags only suppress focus, not the
+  // tab itself), so we use atom.workspace.buildTextEditor (for new/untitled)
+  // or createItemForURI (for path-backed) to materialize the editor without
+  // adding it to a pane.
   let filePath;
   if (!uriOrPathOrOptions) {
-    return atom.workspace.open('').then(e => new TextDocument(e));
+    return Promise.resolve(getTextDocument(atom.workspace.buildTextEditor()));
   } else if (typeof uriOrPathOrOptions === 'string') {
     filePath = uriOrPathOrOptions;
   } else if (uriOrPathOrOptions.fsPath) {
     filePath = uriOrPathOrOptions.fsPath;
   } else if (uriOrPathOrOptions.content !== undefined || uriOrPathOrOptions.language) {
     // Untitled document with content
-    return atom.workspace.open('').then(async editor => {
-      if (uriOrPathOrOptions.content) editor.setText(uriOrPathOrOptions.content);
-      if (uriOrPathOrOptions.language) {
-        const grammar = atom.grammars.grammarForScopeName(`source.${uriOrPathOrOptions.language}`);
-        if (grammar) editor.setGrammar(grammar);
-      }
-      return getTextDocument(editor);
-    });
+    const editor = atom.workspace.buildTextEditor();
+    if (uriOrPathOrOptions.content) editor.setText(uriOrPathOrOptions.content);
+    if (uriOrPathOrOptions.language) {
+      const grammar = atom.grammars.grammarForScopeName(`source.${uriOrPathOrOptions.language}`);
+      if (grammar) editor.setGrammar(grammar);
+    }
+    return Promise.resolve(getTextDocument(editor));
   }
 
-  return atom.workspace.open(filePath, { activatePane: false, activateItem: false })
+  return Promise.resolve(atom.workspace.createItemForURI(filePath))
     .then(editor => getTextDocument(editor));
 }
 
@@ -350,10 +356,16 @@ async function applyEdit(workspaceEdit) {
   const entries = workspaceEdit.entries ? workspaceEdit.entries() : [];
   for (const [uri, edits] of entries) {
     const filePath = uri.fsPath;
+    // VSCode's applyEdit operates on the in-memory document, never on the
+    // visible tab. atom.workspace.open would create a tab — use
+    // createItemForURI so we get a TextEditor backed by the file's buffer
+    // without attaching to a pane. If the file is already open in a tab,
+    // its buffer is shared so edits still propagate.
     let editor;
     try {
-      editor = await atom.workspace.open(filePath, { activatePane: false, activateItem: false });
+      editor = await Promise.resolve(atom.workspace.createItemForURI(filePath));
     } catch (e) { continue; }
+    if (!editor) continue;
 
     editor.transact(() => {
       const sorted = [...edits].sort((a, b) => {
