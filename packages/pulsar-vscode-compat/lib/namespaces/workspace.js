@@ -393,20 +393,49 @@ async function applyEdit(workspaceEdit) {
   return true;
 }
 
+// Cache: VSCode config-section (e.g. "calva") → Pulsar wrapper package name
+// (e.g. "vscode-BetterTOML-calva"). Populated lazily; cleared on package load.
+const _configSectionOwnerCache = new Map();
+
+function _findOwnerPackage(section) {
+  if (!section) return null;
+  if (_configSectionOwnerCache.has(section)) return _configSectionOwnerCache.get(section);
+  let owner = null;
+  try {
+    for (const pkg of atom.packages.getLoadedPackages()) {
+      const meta = pkg.metadata && pkg.metadata._vscodeExtension;
+      if (meta && Array.isArray(meta.configSections) && meta.configSections.includes(section)) {
+        owner = pkg.name;
+        break;
+      }
+    }
+  } catch (_) {}
+  _configSectionOwnerCache.set(section, owner);
+  return owner;
+}
+
 class WorkspaceConfiguration {
-  constructor(section, atomConfig) {
-    this._section = section;
-    this._atomConfig = atomConfig;
+  constructor(section, ownerPkg) {
+    this._section  = section;
+    this._ownerPkg = ownerPkg || null;
+  }
+
+  // Build the Atom config key: "{ownerPkg}.{section}.{key}" when we know the
+  // wrapper package, otherwise fall back to plain "{section}.{key}".
+  _atomKey(key) {
+    const base = this._section ? `${this._section}.${key}` : key;
+    return this._ownerPkg ? `${this._ownerPkg}.${base}` : base;
   }
 
   get(key, defaultValue) {
+    const atomKey = this._atomKey(key);
     const fullKey = this._section ? `${this._section}.${key}` : key;
-    // Try pulsar config first
+
     let val;
-    try { val = atom.config.get(fullKey); } catch (e) {}
-    if (val === undefined) {
-      // Try direct key
-      try { val = atom.config.get(key); } catch (e) {}
+    try { val = atom.config.get(atomKey); } catch (_) {}
+    // For plain built-in VSCode keys (e.g. "editor.rulers") that have no owner
+    if (val === undefined && atomKey !== fullKey) {
+      try { val = atom.config.get(fullKey); } catch (_) {}
     }
     if (val !== undefined) return val;
 
@@ -417,26 +446,26 @@ class WorkspaceConfiguration {
   has(key) { return this.get(key) !== undefined; }
 
   inspect(key) {
+    const atomKey = this._atomKey(key);
     const fullKey = this._section ? `${this._section}.${key}` : key;
-    const val = atom.config.get(fullKey);
     return {
       key: fullKey,
-      globalValue: val,
+      globalValue: atom.config.get(atomKey),
       defaultValue: getConfigurationDefault(fullKey),
       workspaceValue: undefined,
       workspaceFolderValue: undefined,
-      languageIds: []
+      languageIds: [],
     };
   }
 
-  async update(key, value, target) {
-    const fullKey = this._section ? `${this._section}.${key}` : key;
-    atom.config.set(fullKey, value);
+  async update(key, value, _target) {
+    atom.config.set(this._atomKey(key), value);
   }
 }
 
-function getConfiguration(section, scopeOrUri) {
-  return new WorkspaceConfiguration(section);
+function getConfiguration(section, _scopeOrUri) {
+  const owner = _findOwnerPackage(section);
+  return new WorkspaceConfiguration(section, owner);
 }
 
 function getWorkspaceFolder(uri) {

@@ -1,0 +1,18 @@
+{
+  "menu": [
+    {
+      "label": "Packages",
+      "submenu": [
+        {
+          "label": "VSCode Extensions",
+          "submenu": [
+            {
+              "label": "Browse Extensions (Open VSX)…",
+              "command": "pulsar-vscode-compat:browse-extensions"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

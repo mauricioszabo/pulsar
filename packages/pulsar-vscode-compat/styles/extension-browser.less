@@ -1,0 +1,148 @@
+.pulsar-vsx-browser {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-size: 13px;
+  overflow: hidden;
+
+  .vsx-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    border-bottom: 1px solid @base-border-color;
+    flex-shrink: 0;
+
+    .vsx-title {
+      font-size: 14px;
+      font-weight: bold;
+    }
+
+    .vsx-search-group {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+
+      .vsx-search {
+        width: 280px;
+      }
+    }
+  }
+
+  .vsx-body {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+
+    .vsx-list {
+      width: 340px;
+      min-width: 240px;
+      flex-shrink: 0;
+      overflow-y: auto;
+      border-right: 1px solid @base-border-color;
+      padding: 4px 0;
+
+      .vsx-hint, .vsx-loading, .vsx-empty, .vsx-error {
+        padding: 16px 12px;
+      }
+    }
+
+    .vsx-detail {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0;
+
+      &.hidden { display: none; }
+
+      .vsx-detail-header {
+        padding: 16px;
+
+        .vsx-detail-name {
+          font-size: 16px;
+          font-weight: bold;
+          margin-bottom: 4px;
+        }
+        .vsx-detail-id   { margin-bottom: 8px; font-size: 12px; }
+        .vsx-detail-desc { margin-bottom: 12px; }
+
+        .vsx-detail-actions {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+        .vsx-progress {
+          font-size: 12px;
+          &.hidden { display: none; }
+        }
+      }
+
+      hr { margin: 0; border-color: @base-border-color; }
+
+      .vsx-readme-pane {
+        padding: 16px;
+      }
+
+      .vsx-readme {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: @font-family;
+        font-size: 12px;
+        line-height: 1.5;
+        background: none;
+        border: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .vsx-readme-loading { padding: 12px 0; }
+    }
+  }
+
+  .vsx-result-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid transparent;
+
+    &:hover {
+      background: @button-background-color-hover;
+    }
+
+    .vsx-result-icon {
+      font-size: 22px;
+      flex-shrink: 0;
+      padding-top: 2px;
+    }
+
+    .vsx-result-body {
+      min-width: 0;
+    }
+
+    .vsx-result-name {
+      font-weight: bold;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .vsx-result-id   { font-size: 11px; margin: 2px 0; }
+
+    .vsx-result-desc {
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 280px;
+    }
+  }
+
+  .vsx-statusbar {
+    padding: 4px 12px;
+    font-size: 11px;
+    border-top: 1px solid @base-border-color;
+    flex-shrink: 0;
+    min-height: 22px;
+  }
+}

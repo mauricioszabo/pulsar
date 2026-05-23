@@ -10,24 +10,36 @@ function _initNamespaces() {
   try { require('./namespaces/window')._init(); } catch (e) { console.error('[vscode-compat] window init:', e); }
 }
 
+function _registerExtensionBrowser() {
+  const { ExtensionBrowserView, BROWSER_URI } = require('./ui/extension-browser');
+
+  atom.workspace.addOpener(uri => {
+    if (uri === BROWSER_URI) return new ExtensionBrowserView();
+  });
+
+  atom.deserializers.add({
+    name: 'PulsarVsxBrowser',
+    deserialize: state => new ExtensionBrowserView(state),
+  });
+
+  atom.commands.add('atom-workspace', {
+    'pulsar-vscode-compat:browse-extensions': () =>
+      atom.workspace.open(BROWSER_URI),
+  });
+}
+
 module.exports = {
   activate() {
     _initNamespaces();
+    _registerExtensionBrowser();
   },
 
   deactivate() {},
 
-  // Provide the vscode module via the pulsar.api service so that
-  // Module._load (patched in src/module-utils.js) can intercept require('vscode').
   providePulsarApi() {
-    return {
-      moduleName: 'vscode',
-      score: 1,
-      exportFunction: () => require('./vscode')
-    };
+    return { moduleName: 'vscode', score: 1, exportFunction: () => require('./vscode') };
   },
 
-  // Service consumers
   consumeStatusBar(service) {
     require('./namespaces/window').consumeStatusBar(service);
   },
@@ -37,16 +49,13 @@ module.exports = {
     require('./namespaces/languages')._setLinterIndie(indie);
   },
 
-  consumeWatchEditor(watchEditor) {
-    // Not needed; we manage editors via atom.workspace.observeTextEditors
-  },
+  consumeWatchEditor() {},
 
-  // Service providers
   provideAutocomplete() {
     return require('./namespaces/languages')._completionProviders;
   },
 
   provideSymbols() {
     return require('./namespaces/languages')._symbolProviders;
-  }
+  },
 };
