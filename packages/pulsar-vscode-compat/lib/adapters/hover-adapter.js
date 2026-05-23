@@ -28,8 +28,9 @@ function setupHoverHandling() {
       _hoverDebounce = setTimeout(() => handleHover(event, editor, el), 400);
     };
 
-    const onMouseLeave = () => {
+    const onMouseLeave = (event) => {
       clearTimeout(_hoverDebounce);
+      if (_activeTooltipEl && event && _activeTooltipEl.contains(event.relatedTarget)) return;
       removeTooltip();
     };
 
@@ -47,6 +48,17 @@ async function handleHover(event, editor, editorEl) {
   const grammar = editor.getGrammar();
   const matching = hoverProviders.filter(h => matchesSelector(grammar.scopeName, h.documentSelector));
   if (!matching.length) return;
+
+  // `screenPositionForMouseEvent` intentionally clamps clicks/mouse positions
+  // beyond rendered text to the closest cursor position (usually the end of the
+  // line). That is right for cursor placement, but too permissive for hovers:
+  // a provider such as Calva/clojure-lsp can return hover info for the nearest
+  // symbol even when the pointer is far to the right of the code. VSCode only
+  // asks hover providers when the pointer is actually over rendered token text.
+  if (!isPointerOverRenderedText(event, editorEl)) {
+    removeTooltip();
+    return;
+  }
 
   let screenPos;
   try {
@@ -98,8 +110,25 @@ async function showTooltip(hover, event, editor) {
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     white-space: normal;
     overflow-wrap: anywhere;
-    pointer-events: none;
+    pointer-events: auto;
+    user-select: text;
   `;
+
+  el.addEventListener('mouseenter', () => {
+    clearTimeout(_hoverDebounce);
+  });
+  el.addEventListener('mouseleave', removeTooltip);
+  el.addEventListener('click', event => {
+    const anchor = event.target && event.target.closest && event.target.closest('a[href]');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (!href || !href.startsWith('file://')) return;
+    event.preventDefault();
+    try {
+      const url = new URL(href);
+      atom.workspace.open(decodeURIComponent(url.pathname));
+    } catch (e) {}
+  });
 
   const contents = Array.isArray(hover.contents) ? hover.contents : [hover.contents];
   for (const content of contents) {
@@ -135,6 +164,8 @@ async function contentToElement(content, editor) {
 async function markdownToElement(markdown, editor) {
   const wrapper = document.createElement('div');
   wrapper.classList.add('vscode-hover-content', 'markdown');
+
+  markdown = normalizeHoverMarkdown(String(markdown));
 
   const markdownApi = atom.ui && atom.ui.markdown;
   if (!markdownApi || typeof markdownApi.render !== 'function') {
@@ -180,6 +211,32 @@ function longestBacktickRun(text) {
   return matches ? Math.max(...matches.map(match => match.length)) : 2;
 }
 
+function normalizeHoverMarkdown(markdown) {
+  // markdown-it intentionally refuses `file:` URLs in normal link syntax, which
+  // makes LSP hover locations such as `[core.clj](file:///tmp/core.clj)` render
+  // literally as Markdown source. VSCode hovers do render these as links. Convert
+  // only that specific inline-link shape to sanitized HTML before handing the
+  // rest of the hover body to Pulsar's Markdown renderer.
+  return String(markdown).replace(/\[([^\]\n]+)\]\((file:\/\/[^\s)]+)\)/g, (_match, label, href) => {
+    return `<a href="${escapeHtmlAttribute(href)}">${escapeHtml(label)}</a>`;
+  });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>]/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;'
+  }[char]));
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeHtml(value).replace(/["']/g, char => ({
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
+}
+
 function isBlankHoverContent(content) {
   if (content == null) return true;
   if (typeof content === 'string') return content.trim().length === 0;
@@ -203,6 +260,44 @@ function positionTooltip(el, event) {
   const y = Math.max(8, Math.min(event.clientY + 10, window.innerHeight - rect.height - 8));
   el.style.left = x + 'px';
   el.style.top = y + 'px';
+}
+
+function isPointerOverRenderedText(event, editorEl) {
+  if (!event || !editorEl || typeof document.caretRangeFromPoint !== 'function') return true;
+
+  let range;
+  try {
+    range = document.caretRangeFromPoint(event.clientX, event.clientY);
+  } catch (e) {
+    return true;
+  }
+
+  if (!range || !range.startContainer || !editorEl.contains(range.startContainer)) return false;
+  if (range.startContainer.nodeType !== Node.TEXT_NODE) return false;
+
+  const textNode = range.startContainer;
+  const offset = range.startOffset;
+  return isPointerInsideTextCharacter(event, textNode, offset) ||
+    isPointerInsideTextCharacter(event, textNode, offset - 1);
+}
+
+function isPointerInsideTextCharacter(event, textNode, offset) {
+  const text = textNode.textContent || '';
+  if (offset < 0 || offset >= text.length || /\s/.test(text[offset])) return false;
+
+  const range = document.createRange();
+  try {
+    range.setStart(textNode, offset);
+    range.setEnd(textNode, offset + 1);
+    return Array.from(range.getClientRects()).some(rect =>
+      event.clientX >= rect.left && event.clientX <= rect.right &&
+      event.clientY >= rect.top && event.clientY <= rect.bottom
+    );
+  } catch (e) {
+    return false;
+  } finally {
+    range.detach && range.detach();
+  }
 }
 
 function removeTooltip() {
