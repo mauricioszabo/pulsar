@@ -1,65 +1,95 @@
 // Command dispatcher. Ported from ppm/src/apm-cli.js.
 //
-// Differences:
-//  * No `npm`, no `asar-require`, no `process.title = 'apm'`. We run inside
-//    the Pulsar main process, so the title belongs to Pulsar.
-//  * `printVersions` reports the Electron Node + Pulsar version instead of
-//    the bundled-Node + bundled-npm version.
+// Differences from the original:
+//  * No `npm`, no `asar-require`, no `process.title = 'apm'`. We run
+//    inside the Pulsar main process, so the title belongs to Pulsar.
+//  * `printVersions` reports Electron + Pulsar version instead of the
+//    bundled-Node + bundled-npm version.
+//  * Command modules are loaded lazily, so a missing optional dependency
+//    in one command (e.g. `plist` for `package-converter`) doesn't take
+//    down the whole package manager — the breakage is scoped to that
+//    one command. Same trick for `colors` and `wordwrap`: we polyfill
+//    them when they're not installed so the dispatcher still works.
 
 const path = require('path');
-const colors = require('colors');
 const yargs = require('yargs');
-const wordwrap = require('wordwrap');
 
 const paths = require('./paths');
 const fs = require('./fs');
 const git = require('./git');
 
-function setupTempDirectory() {
+// `colors` monkey-patches String.prototype with chainable getters. If it
+// isn't installed we add no-op getters so `'foo'.green` still resolves to
+// the string itself — every command file uses these expressions inline.
+try {
+  require('colors');
+} catch (_) {
+  const props = [
+    'black','red','green','yellow','blue','magenta','cyan','white',
+    'gray','grey','rainbow','zebra','random','disable','strip',
+    'bold','underline','italic','inverse','strikethrough','reset',
+    'bgBlack','bgRed','bgGreen','bgYellow','bgBlue','bgMagenta','bgCyan','bgWhite'
+  ];
+  for (const p of props) {
+    if (!(p in String.prototype)) {
+      Object.defineProperty(String.prototype, p, {
+        get() { return this.toString(); },
+        configurable: true
+      });
+    }
+  }
+}
+
+// `wordwrap` is a tiny dep — fall back to a no-op if it's missing.
+let wordwrap;
+try { wordwrap = require('wordwrap'); }
+catch (_) { wordwrap = () => (s) => s; }
+
+// `temp` is used to make the OS tmp dir; if it's not present we skip
+// the auto-cleanup. Commands that actually need temp will require it
+// themselves and surface a clearer error.
+try {
   const temp = require('temp');
   let tempDirectory = require('os').tmpdir();
   tempDirectory = path.resolve(fs.absolute(tempDirectory));
   temp.dir = tempDirectory;
   try { fs.makeTreeSync(temp.dir); } catch (_) {}
-  return temp.track();
-}
-setupTempDirectory();
+  temp.track();
+} catch (_) {}
 
-const commandClasses = [
-  require('./ci.js'),
-  require('./clean.js'),
-  require('./config.js'),
-  require('./dedupe.js'),
-  require('./develop.js'),
-  require('./disable.js'),
-  require('./docs.js'),
-  require('./enable.js'),
-  require('./featured.js'),
-  require('./init.js'),
-  require('./install.js'),
-  require('./links.js'),
-  require('./link.js'),
-  require('./list.js'),
-  require('./login.js'),
-  require('./publish.js'),
-  require('./rebuild.js'),
-  require('./rebuild-module-cache.js'),
-  require('./search.js'),
-  require('./star.js'),
-  require('./stars.js'),
-  require('./test.js'),
-  require('./uninstall.js'),
-  require('./unlink.js'),
-  require('./unpublish.js'),
-  require('./unstar.js'),
-  require('./upgrade.js'),
-  require('./view.js')
+// Map of command name (and aliases) → factory that lazily requires the
+// matching module. Loading a single command's module never triggers the
+// other 26.
+const commandFiles = [
+  'ci', 'clean', 'config', 'dedupe', 'develop', 'disable', 'docs',
+  'enable', 'featured', 'init', 'install', 'links', 'link', 'list',
+  'login', 'publish', 'rebuild', 'rebuild-module-cache', 'search',
+  'star', 'stars', 'test', 'uninstall', 'unlink', 'unpublish',
+  'unstar', 'upgrade', 'view'
 ];
 
-const commands = {};
-for (const commandClass of commandClasses) {
-  for (const name of commandClass.commandNames ?? []) {
-    commands[name] = commandClass;
+// Build a name→loader index without touching disk. We need the list of
+// aliases for help and dispatch, but loading is deferred.
+const commandLoaders = {};
+const knownCommandNames = new Set();
+function aliasesFor(name) {
+  // Hand-rolled alias table for the few commands that expose more than
+  // one name. Keeping these here avoids requiring every module just to
+  // read its `commandNames` static.
+  switch (name) {
+    case 'install': return ['install', 'i'];
+    case 'list':    return ['list', 'ls'];
+    case 'clean':   return ['clean', 'prune'];
+    case 'develop': return ['dev', 'develop'];
+    case 'upgrade': return ['upgrade', 'outdated', 'update'];
+    default: return [name];
+  }
+}
+for (const name of commandFiles) {
+  const loader = () => require(`./${name}.js`);
+  for (const alias of aliasesFor(name)) {
+    commandLoaders[alias] = loader;
+    knownCommandNames.add(alias);
   }
 }
 
@@ -72,9 +102,9 @@ Pulsar Package Manager powered by https://pulsar-edit.dev
   Usage: pulsar --package <command>
 
   where <command> is one of:
-  ${wordwrap(4, 80)(Object.keys(commands).sort().join(', '))}.
+  ${wordwrap(4, 80)(Array.from(knownCommandNames).sort().join(', '))}.
 
-  Run \`pulsar --package help <command>\` to see the more details about a specific command.`
+  Run \`pulsar --package help <command>\` to see more details about a specific command.`
   );
   options.alias('v', 'version').describe('version', 'Print the ppm version');
   options.alias('h', 'help').describe('help', 'Print this usage message');
@@ -168,20 +198,33 @@ function getPythonVersion() {
   });
 }
 
+function loadCommand(name) {
+  const loader = commandLoaders[name];
+  if (!loader) return null;
+  try {
+    return loader();
+  } catch (e) {
+    console.error(`Failed to load \`${name}\` command: ${e.message}`.red);
+    return null;
+  }
+}
+
 module.exports = {
   run(args, callback) {
-    let Command;
     paths.setupApmRcFile();
     const options = parseOptions(args);
 
-    if (!options.argv.color) colors.disable();
+    if (!options.argv.color && String.prototype.disable) {
+      // colors@1's disable() is a no-op when colors isn't loaded
+      String.prototype.disable.call('');
+    }
 
     let callbackCalled = false;
     const errorHandler = error => {
       if (callbackCalled) return;
       callbackCalled = true;
       if (error != null) {
-        const message = typeof error === 'string' ? error : error.message ?? String(error);
+        const message = typeof error === 'string' ? error : (error.stack || error.message || String(error));
         if (message === 'canceled') console.log();
         else if (message) console.error(message.red);
       }
@@ -190,34 +233,36 @@ module.exports = {
 
     args = options.argv;
     const { command } = options;
-    if (args.version) {
-      return printVersions(args).then(errorHandler);
-    } else if (args.help) {
-      if (commands[options.command]) {
-        Command = commands[options.command];
-        showHelp(new Command().parseOptions?.(options.command));
+    try {
+      if (args.version) {
+        return printVersions(args).then(errorHandler, errorHandler);
+      } else if (args.help) {
+        const Command = loadCommand(options.command);
+        if (Command) showHelp(new Command().parseOptions?.(options.command));
+        else showHelp(options);
+        return errorHandler();
+      } else if (command) {
+        if (command === 'help') {
+          const helpTarget = Array.isArray(options.commandArgs) ? options.commandArgs[0] : options.commandArgs;
+          const Command = loadCommand(helpTarget);
+          if (Command) showHelp(new Command().parseOptions?.(helpTarget));
+          else showHelp(options);
+          return errorHandler();
+        }
+        const Command = loadCommand(command);
+        if (Command) {
+          const instance = new Command();
+          return Promise.resolve()
+            .then(() => instance.run(options))
+            .then(errorHandler, errorHandler);
+        }
+        return errorHandler(`Unrecognized command: ${command}`);
       } else {
         showHelp(options);
-      }
-      return errorHandler();
-    } else if (command) {
-      if (command === 'help') {
-        if (commands[options.commandArgs]) {
-          Command = commands[options.commandArgs];
-          showHelp(new Command().parseOptions?.(options.commandArgs));
-        } else {
-          showHelp(options);
-        }
         return errorHandler();
-      } else if ((Command = commands[command])) {
-        const instance = new Command();
-        return Promise.resolve(instance.run(options)).then(errorHandler).catch(errorHandler);
-      } else {
-        return errorHandler(`Unrecognized command: ${command}`);
       }
-    } else {
-      showHelp(options);
-      return errorHandler();
+    } catch (e) {
+      return errorHandler(e);
     }
   }
 };

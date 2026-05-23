@@ -7,9 +7,25 @@
 // `runCli` writes to stdout/stderr (terminal mode). `runCommand` returns
 // the captured output as `{ code, stdout, stderr }` for programmatic use.
 
-const cli = require('./cli');
+// Lazy-load the dispatcher so a missing optional dependency in one
+// command can never prevent this module from being required. Failures
+// surface inside `runCli`/`runCommand` as a non-zero exit code with the
+// error on stderr — easy for callers to handle.
+let _cli;
+function loadCli() {
+  if (_cli) return _cli;
+  _cli = require('./cli');
+  return _cli;
+}
 
 async function runCli(argv) {
+  let cli;
+  try { cli = loadCli(); }
+  catch (e) {
+    process.stderr.write(`ppm: failed to load package manager: ${e.message}\n`);
+    process.stderr.write('Hint: run `yarn install` in the Pulsar source directory to install package-manager dependencies.\n');
+    return 1;
+  }
   return new Promise((resolve) => {
     cli.run(argv, (error) => resolve(error != null ? 1 : 0));
   });
@@ -49,14 +65,18 @@ async function runCommand(args, opts = {}) {
   }
 
   let code = 0;
+  let cli;
   try {
+    cli = loadCli();
     await new Promise((resolve) => cli.run(args, (error) => {
       code = error != null ? 1 : 0;
       resolve();
     }));
   } catch (e) {
     code = 1;
-    const msg = String(e?.stack || e?.message || e);
+    const msg = e?.message?.includes('Cannot find module')
+      ? `${e.message}\nHint: run \`yarn install\` in the Pulsar source directory to install package-manager dependencies.`
+      : String(e?.stack || e?.message || e);
     stderrChunks.push(msg);
     if (typeof opts.onProgress === 'function') {
       try { opts.onProgress('stderr', msg); } catch (_) {}

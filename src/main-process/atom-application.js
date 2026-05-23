@@ -154,7 +154,14 @@ ipcMain.handle('package-manager:run', async (event, { id, args, opts }) => {
       event.sender.send('package-manager:progress', { id, stream, chunk });
     };
   }
-  return require('../package-manager-cli').runCommand(args, callOpts);
+  // Catch absolutely everything — a synchronous require() failure here
+  // would otherwise reject the invoke promise with no useful detail, and
+  // the renderer would see an empty list with no clue why.
+  try {
+    return await require('../package-manager-cli').runCommand(args, callOpts);
+  } catch (e) {
+    return { code: 1, stdout: '', stderr: String(e?.stack || e?.message || e) };
+  }
 });
 
 // The application's singleton class.

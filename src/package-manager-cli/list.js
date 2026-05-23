@@ -165,14 +165,35 @@ List all the installed packages and also the packages bundled with Atom.\
     async listBundledPackages(options) {
       const resourcePath = await config.getResourcePath();
       let atomPackages;
+      let packageJson;
       try {
         const metadataPath = path.join(resourcePath, 'package.json');
-        ({_atomPackages: atomPackages} = JSON.parse(fs.readFileSync(metadataPath)));
+        packageJson = JSON.parse(fs.readFileSync(metadataPath));
+        atomPackages = packageJson._atomPackages;
       } catch (error) {}
+
+      // In a built Pulsar `_atomPackages` is precomputed by
+      // `generate-metadata-for-builder`. When running from source it isn't
+      // populated yet, so fall back to scanning the `packageDependencies`
+      // list and reading each bundled package's `package.json` directly
+      // out of `node_modules`. Otherwise the Packages tab would look empty
+      // in dev mode.
+      if (atomPackages == null && packageJson?.packageDependencies) {
+        atomPackages = {};
+        for (const name of Object.keys(packageJson.packageDependencies)) {
+          try {
+            const pkgPath = path.join(resourcePath, 'node_modules', name, 'package.json');
+            if (!fs.isFileSync(pkgPath)) continue;
+            const metadata = JSON.parse(fs.readFileSync(pkgPath));
+            atomPackages[name] = { metadata };
+          } catch (_) {}
+        }
+      }
+
       atomPackages ??= {};
       const packagesMeta = Object.values(atomPackages)
         .map(packageValue => packageValue.metadata)
-        .filter(metadata => this.isPackageVisible(options, metadata));
+        .filter(metadata => metadata && this.isPackageVisible(options, metadata));
 
       if (!options.argv.bare && !options.argv.json) {
         console.log(`${`Built-in Atom ${options.argv.themes ? 'Themes' : 'Packages'}`.cyan} (${packagesMeta.length})`);
