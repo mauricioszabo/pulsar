@@ -277,7 +277,7 @@ let options = {
         "from": ICONS.svg,
         "to": `${baseName}.svg`
       },
-      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
+      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}` }
     ]
   },
 
@@ -309,7 +309,7 @@ let options = {
       ]
     },
     extraResources: [
-      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
+      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}` }
     ]
   },
 
