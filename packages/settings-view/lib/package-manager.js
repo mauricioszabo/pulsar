@@ -8,19 +8,40 @@ const Client = require('./atom-io-client');
 // Drop-in replacement for the previous BufferedProcess workflow. Instead
 // of spawning the `ppm` binary, we ask the main process to run the
 // command in-process via the `package-manager:run` IPC handler.
+//
+// stdout/stderr callbacks are fired per chunk as data arrives — matching
+// BufferedProcess semantics — by subscribing to the
+// `package-manager:progress` IPC channel for the duration of the call.
+// Long-running operations like `install` can therefore stream their
+// progress into the UI instead of looking frozen.
+let _nextIpcProcessId = 0;
 class IpcProcess {
   constructor({args, opts = {}, stdout, stderr, exit}) {
     this._stdout = stdout;
     this._stderr = stderr;
     this._exit = exit;
     this._errHandlers = [];
-    electron.ipcRenderer.invoke('package-manager:run', { args, opts })
+    this._id = ++_nextIpcProcessId;
+
+    const onProgress = (_event, payload) => {
+      if (!payload || payload.id !== this._id) return;
+      if (payload.stream === 'stdout' && typeof this._stdout === 'function') {
+        this._stdout(payload.chunk);
+      } else if (payload.stream === 'stderr' && typeof this._stderr === 'function') {
+        this._stderr(payload.chunk);
+      }
+    };
+    electron.ipcRenderer.on('package-manager:progress', onProgress);
+
+    const cleanup = () => electron.ipcRenderer.removeListener('package-manager:progress', onProgress);
+
+    electron.ipcRenderer.invoke('package-manager:run', { id: this._id, args, opts })
       .then(result => {
-        if (result.stdout && typeof this._stdout === 'function') this._stdout(result.stdout);
-        if (result.stderr && typeof this._stderr === 'function') this._stderr(result.stderr);
+        cleanup();
         if (typeof this._exit === 'function') this._exit(result.code);
       })
       .catch(error => {
+        cleanup();
         for (const handler of this._errHandlers) {
           let handled = false;
           handler({ error, handle: () => { handled = true; } });
@@ -107,11 +128,21 @@ module.exports = class PackageManager {
     }
   }
 
-  runCommand(args, callback) {
+  // `onProgress(chunk, stream)` is optional; when provided, the callback
+  // fires for every stdout/stderr chunk as it streams in from the
+  // in-process package manager. Callers like `install` use this to emit
+  // live progress events for the UI.
+  runCommand(args, callback, onProgress) {
     const outputLines = [];
-    const stdout = chunk => outputLines.push(chunk);
+    const stdout = chunk => {
+      outputLines.push(chunk);
+      if (typeof onProgress === 'function') onProgress(chunk, 'stdout');
+    };
     const errorLines = [];
-    const stderr = chunk => errorLines.push(chunk);
+    const stderr = chunk => {
+      errorLines.push(chunk);
+      if (typeof onProgress === 'function') onProgress(chunk, 'stderr');
+    };
     const exit = code => callback(code, outputLines.join(''), errorLines.join(''));
 
     args = [...args, '--no-color'];
@@ -416,7 +447,7 @@ module.exports = class PackageManager {
     };
 
     this.emitPackageEvent('updating', pack);
-    const apmProcess = this.runCommand(args, exit);
+    const apmProcess = this.runCommand(args, exit, chunk => this.emitProgressMessage(pack, chunk));
     return handleProcessErrors(apmProcess, errorMessage, onError);
   }
 
@@ -475,7 +506,7 @@ module.exports = class PackageManager {
     };
 
     this.emitPackageEvent('installing', pack);
-    const apmProcess = this.runCommand(args, exit);
+    const apmProcess = this.runCommand(args, exit, chunk => this.emitProgressMessage(pack, chunk));
     return handleProcessErrors(apmProcess, errorMessage, onError);
   }
 
@@ -506,7 +537,7 @@ module.exports = class PackageManager {
         error.stderr = stderr;
         return onError(error);
       }
-    });
+    }, chunk => this.emitProgressMessage(pack, chunk));
 
     return handleProcessErrors(apmProcess, errorMessage, onError);
   }
@@ -586,6 +617,16 @@ module.exports = class PackageManager {
     const theme = pack.theme != null ? pack.theme : (pack.metadata != null ? pack.metadata.theme : undefined);
     eventName = theme ? `theme-${eventName}` : `package-${eventName}`;
     return this.emitter.emit(eventName, {pack, error});
+  }
+
+  // Fires a `theme-install-progress` or `package-install-progress` event
+  // for each stdout/stderr chunk received during install/update/uninstall.
+  // Subscribers (e.g., package-card.js) can use the streamed `message` to
+  // give the user real-time feedback during long-running operations.
+  emitProgressMessage(pack, message) {
+    const theme = pack.theme != null ? pack.theme : (pack.metadata != null ? pack.metadata.theme : undefined);
+    const eventName = theme ? 'theme-install-progress' : 'package-install-progress';
+    this.emitter.emit(eventName, {pack, message});
   }
 
   on(selectors, callback) {

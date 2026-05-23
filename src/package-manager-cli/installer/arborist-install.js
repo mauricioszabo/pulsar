@@ -48,8 +48,28 @@ async function ensureStaging(dir) {
   }
 }
 
+// Forward `proc-log` events (which arborist and its npm-cli dependencies
+// emit) onto stdout so the caller's stdout capture / progress streaming
+// sees them. Installed once per process; the listener is a no-op when
+// arborist isn't running.
+let _procLogWired = false;
+function wireProcLog() {
+  if (_procLogWired) return;
+  _procLogWired = true;
+  // proc-log emits a single `log` event on `process` with the level as
+  // its first argument. Surface the human-relevant levels and drop the
+  // chatter.
+  const visible = new Set(['notice', 'http', 'info', 'warn', 'error']);
+  process.on('log', (level, prefix, ...rest) => {
+    if (!visible.has(level)) return;
+    const line = [prefix, ...rest].filter(Boolean).join(' ');
+    if (line) process.stdout.write(`  ${line}\n`);
+  });
+}
+
 async function installSpec(stagingDir, spec, opts = {}) {
   await ensureStaging(stagingDir);
+  wireProcLog();
   const Arborist = require('@npmcli/arborist');
   const arb = new Arborist(arboristOptions(stagingDir, opts));
   await arb.reify({ add: [spec], save: false });
@@ -57,6 +77,7 @@ async function installSpec(stagingDir, spec, opts = {}) {
 }
 
 async function installDeps(packageDir, opts = {}) {
+  wireProcLog();
   const Arborist = require('@npmcli/arborist');
   const arb = new Arborist(arboristOptions(packageDir, opts));
   await arb.reify();

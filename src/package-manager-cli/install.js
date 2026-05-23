@@ -93,7 +93,9 @@ package names to install with optional versions using the
     }
 
     const stagingDir = temp.mkdirSync('ppm-install-dir-');
+    const progress = (msg) => { if (!options.argv.json) process.stdout.write(`\n  ${msg}`); };
     try {
+      progress('Downloading and resolving dependencies…');
       await arboristInstall.installSpec(stagingDir, moduleSpec);
     } catch (e) {
       let error = String(e?.stack || e?.message || e);
@@ -115,8 +117,11 @@ package names to install with optional versions using the
     const destination = path.join(this.atomPackagesDirectory, child);
 
     try {
+      progress(`Moving ${child} into ${this.atomPackagesDirectory}…`);
       await fs.cp(source, destination);
+      progress('Compiling native modules for Electron (if any)…');
       await electronRebuild.rebuildAll(destination).catch(() => {}); // best-effort
+      progress('Updating module cache…');
       await this.buildModuleCache(child);
       await this.warmCompileCache(child);
     } catch (err) {
@@ -209,11 +214,13 @@ Run ppm -v after installing Git to see what version has been detected.`;
 
     let pack;
     try {
+      if (!options.argv.json) process.stdout.write('\n  Fetching package metadata from the registry…');
       pack = await this.requestPackage(packageName);
       packageVersion ??= this.getLatestCompatibleVersion(pack);
       if (!packageVersion) {
         throw `No available version compatible with the installed Pulsar version: ${this.installedAtomVersion}`;
       }
+      if (!options.argv.json) process.stdout.write(`\n  Resolved version ${packageVersion}.`);
       const { tarball } = pack.versions[packageVersion]?.dist ?? {};
       if (!tarball) throw `Package version: ${packageVersion} not found`;
       const { installPath } = await this.installModule(options, pack, tarball);

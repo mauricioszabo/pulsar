@@ -96,6 +96,7 @@ export default class PackageCard {
           </h4>
           <span ref='packageDescription' className='package-description'>{description}</span>
           <div ref='packageMessage' className='package-message' />
+          <div ref='installProgress' className='package-install-progress text-subtle' />
         </div>
 
         <div className='meta'>
@@ -482,12 +483,14 @@ export default class PackageCard {
       this.updateInterfaceState()
       this.refs.installButton.disabled = true
       this.refs.installButton.classList.add('is-installing')
+      this.resetInstallProgress()
     })
 
     this.subscribeToPackageEvent('package-updating theme-updating', () => {
       this.updateInterfaceState()
       this.refs.updateButton.disabled = true
       this.refs.updateButton.classList.add('is-installing')
+      this.resetInstallProgress()
     })
 
     this.subscribeToPackageEvent('package-uninstalling theme-uninstalling', () => {
@@ -495,6 +498,14 @@ export default class PackageCard {
       this.refs.enablementButton.disabled = true
       this.refs.uninstallButton.disabled = true
       this.refs.uninstallButton.classList.add('is-uninstalling')
+      this.resetInstallProgress()
+    })
+
+    // Stream per-chunk progress messages from the in-process package
+    // manager into the card so the user can see what's happening during
+    // long installs.
+    this.subscribeToPackageEvent('package-install-progress theme-install-progress', (_pack, _error, payload) => {
+      if (payload && payload.message != null) this.appendInstallProgress(payload.message)
     })
 
     this.subscribeToPackageEvent('package-installed package-install-failed theme-installed theme-install-failed', () => {
@@ -505,6 +516,7 @@ export default class PackageCard {
       }
       this.refs.installButton.disabled = false
       this.refs.installButton.classList.remove('is-installing')
+      this.clearInstallProgress()
       this.updateInterfaceState()
     })
 
@@ -523,12 +535,14 @@ export default class PackageCard {
       this.newSha = null
       this.refs.updateButton.disabled = false
       this.refs.updateButton.classList.remove('is-installing')
+      this.clearInstallProgress()
       this.updateInterfaceState()
     })
 
     this.subscribeToPackageEvent('package-update-failed theme-update-failed', () => {
       this.refs.updateButton.disabled = false
       this.refs.updateButton.classList.remove('is-installing')
+      this.clearInstallProgress()
       this.updateInterfaceState()
     })
 
@@ -541,6 +555,26 @@ export default class PackageCard {
       this.updateInterfaceState()
     })
   }
+
+  // Show streamed install/update/uninstall progress under the card. We
+  // tail the output to the last ~8 lines so cards don't grow unboundedly
+  // during dependency-heavy installs.
+  appendInstallProgress (chunk) {
+    if (!chunk || !this.refs || !this.refs.installProgress) return
+    const el = this.refs.installProgress
+    el.style.display = ''
+    const text = (el.textContent || '') + chunk
+    const lines = text.split(/\r?\n/)
+    el.textContent = lines.slice(Math.max(0, lines.length - 8)).join('\n').trimStart()
+  }
+
+  clearInstallProgress () {
+    if (!this.refs || !this.refs.installProgress) return
+    this.refs.installProgress.textContent = ''
+    this.refs.installProgress.style.display = 'none'
+  }
+
+  resetInstallProgress () { this.clearInstallProgress() }
 
   isInstalled () {
     return this.packageManager.isPackageInstalled(this.pack.name)
@@ -555,14 +589,17 @@ export default class PackageCard {
   }
 
   subscribeToPackageEvent (event, callback) {
-    this.disposables.add(this.packageManager.on(event, ({pack, error}) => {
-      if (pack.pack != null) {
+    this.disposables.add(this.packageManager.on(event, (payload) => {
+      let pack = payload && payload.pack
+      if (pack && pack.pack != null) {
         pack = pack.pack
       }
 
-      const packageName = pack.name
+      const packageName = pack && pack.name
       if (packageName === this.pack.name) {
-        callback(pack, error)
+        // Third argument is the full payload — progress events use it to
+        // pass a `message` field that the other events don't carry.
+        callback(pack, payload && payload.error, payload)
       }
     }))
   }

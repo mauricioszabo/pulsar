@@ -20,12 +20,28 @@ async function runCommand(args, opts = {}) {
   // `process.stderr.write` for the duration of the command. We can't simply
   // redirect file descriptors because Electron's main process owns the
   // real fds; patching is the cheapest cross-platform shim.
+  //
+  // While captured, each chunk is also handed to `opts.onProgress` so callers
+  // (e.g., the IPC handler) can stream output to a renderer in real time
+  // instead of waiting for the whole command to finish.
   const stdoutChunks = [];
   const stderrChunks = [];
   const origOut = process.stdout.write.bind(process.stdout);
   const origErr = process.stderr.write.bind(process.stderr);
-  process.stdout.write = (chunk) => { stdoutChunks.push(typeof chunk === 'string' ? chunk : chunk.toString()); return true; };
-  process.stderr.write = (chunk) => { stderrChunks.push(typeof chunk === 'string' ? chunk : chunk.toString()); return true; };
+
+  const wrap = (stream) => (chunk) => {
+    const s = typeof chunk === 'string'
+      ? chunk
+      : Buffer.isBuffer(chunk) ? chunk.toString() : String(chunk);
+    if (stream === 'stdout') stdoutChunks.push(s);
+    else stderrChunks.push(s);
+    if (typeof opts.onProgress === 'function') {
+      try { opts.onProgress(stream, s); } catch (_) {}
+    }
+    return true;
+  };
+  process.stdout.write = wrap('stdout');
+  process.stderr.write = wrap('stderr');
 
   const origCwd = process.cwd();
   if (opts.cwd) {
@@ -40,7 +56,11 @@ async function runCommand(args, opts = {}) {
     }));
   } catch (e) {
     code = 1;
-    stderrChunks.push(String(e?.stack || e?.message || e));
+    const msg = String(e?.stack || e?.message || e);
+    stderrChunks.push(msg);
+    if (typeof opts.onProgress === 'function') {
+      try { opts.onProgress('stderr', msg); } catch (_) {}
+    }
   } finally {
     process.stdout.write = origOut;
     process.stderr.write = origErr;
