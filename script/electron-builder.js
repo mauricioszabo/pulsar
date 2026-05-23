@@ -7,8 +7,10 @@ const { hideBin } = require('yargs/helpers')
 const generateMetadata = require('./generate-metadata-for-builder')
 const macBundleDocumentTypes = require("./mac-bundle-document-types.js");
 
-// The legacy `ppm` submodule check is gone — the package manager now lives in
-// `src/package-manager-cli/` and runs on Electron's bundled Node.
+// The legacy `ppm` submodule check is gone — the package manager now lives
+// in `src/package-manager-cli/` and runs on Electron's bundled Node. The
+// thin `ppm`/`ppm.cmd` wrapper scripts still live at `ppm/bin/` so the
+// path matches what the previous submodule provided.
 
 // Monkey-patch to not remove things I explicitly didn't say to remove.
 // See: https://github.com/electron-userland/electron-builder/issues/6957
@@ -275,7 +277,7 @@ let options = {
         "from": ICONS.svg,
         "to": `${baseName}.svg`
       },
-      { from: 'src/package-manager-cli/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
+      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
     ]
   },
 
@@ -307,7 +309,7 @@ let options = {
       ]
     },
     extraResources: [
-      { from: 'src/package-manager-cli/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
+      { from: 'ppm/bin/ppm', to: `app/ppm/bin/${ppmBaseName}`, fileMode: 0o755 }
     ]
   },
 
@@ -326,7 +328,7 @@ let options = {
       { from: 'resources/win/NSIS_Licenses.txt', to: 'NSIS_Licenses.txt' },
       // Copy the `ppm.cmd` wrapper to the `ppm/bin` directory, possibly
       // renaming it `ppm-next.cmd` depending on release channel.
-      { from: 'src/package-manager-cli/bin/ppm.cmd', to: `app/ppm/bin/${ppmBaseName}.cmd` }
+      { from: 'ppm/bin/ppm.cmd', to: `app/ppm/bin/${ppmBaseName}.cmd` }
     ],
     target: [
       { target: 'nsis' },

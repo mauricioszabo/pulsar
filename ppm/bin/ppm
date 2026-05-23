@@ -1,0 +1,44 @@
+#!/bin/sh
+# Pulsar package manager shim. Invokes `pulsar -p "$@"` so the package
+# manager runs in-process inside the Pulsar main process, on Electron's Node.
+
+DIR=$(cd "$(dirname "$0")" && pwd)
+
+# Channel from script basename: `ppm` -> `pulsar`, `ppm-next` -> `pulsar-next`.
+case "$(basename "$0")" in
+  ppm-next) EXE=pulsar-next ;;
+  *)        EXE=pulsar ;;
+esac
+
+# Layouts we support:
+#   1. Installed Pulsar app:
+#        macOS bundle:  Contents/Resources/app/ppm/bin/ppm -> Contents/MacOS/<Display>
+#        Linux:         <root>/resources/app/ppm/bin/ppm    -> <root>/<exe>
+#      In both, the wrapper sits 4 dirs above the launcher.
+#   2. Source checkout (running this file out of the repo):
+#        <repo>/ppm/bin/ppm -> Electron from node_modules, with the repo as the app.
+
+BIN=""
+if [ -d "$DIR/../../../../MacOS" ]; then
+  for candidate in "$DIR/../../../../MacOS"/*; do
+    if [ -x "$candidate" ] && [ -f "$candidate" ]; then BIN="$candidate"; break; fi
+  done
+fi
+if [ -z "$BIN" ] && [ -x "$DIR/../../../../$EXE" ]; then
+  BIN="$DIR/../../../../$EXE"
+fi
+
+if [ -n "$BIN" ]; then
+  exec "$BIN" -p "$@"
+fi
+
+# Source-tree fallback: `ppm/bin/ppm` lives at `<repo>/ppm/bin/`. There's no
+# standalone `pulsar` binary in the source tree, so launch the checked-out
+# repo via the dev Electron in `node_modules`.
+REPO=$(cd "$DIR/../.." && pwd)
+if [ -x "$REPO/node_modules/electron/dist/electron" ]; then
+  exec "$REPO/node_modules/electron/dist/electron" --no-sandbox "$REPO" -p "$@"
+fi
+
+echo "ppm: cannot locate the Pulsar executable from $DIR" >&2
+exit 1
