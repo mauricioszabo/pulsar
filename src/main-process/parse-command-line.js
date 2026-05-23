@@ -171,7 +171,12 @@ module.exports = function parseCommandLine(processArgs) {
       code => process.exit(code ?? 0),
       err => { console.error(err?.stack || err?.message || err); process.exit(1); }
     );
-    return;
+    // The runCli promise resolves asynchronously and then calls
+    // process.exit. In the meantime we must NOT let the rest of Pulsar's
+    // startup run — `start.js` would try to open windows, register IPC
+    // handlers, etc. Return a sentinel that `start.js` checks before
+    // touching any of the returned fields.
+    return { packageMode: true };
   }
 
   if (args['help']) {

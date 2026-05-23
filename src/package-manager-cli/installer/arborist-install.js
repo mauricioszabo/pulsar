@@ -24,6 +24,12 @@ function arboristOptions(dir, extra = {}) {
     audit: false,
     save: false,
     omit: ['dev'],
+    // `nested` keeps every dependency under its requirer's `node_modules/`
+    // instead of hoisting common deps to the root. That matches what the
+    // legacy ppm relied on (`npm install --global-style`) so the top-level
+    // `node_modules/` of the staging dir has exactly one child — the
+    // package being installed — with all of its own deps tucked inside it.
+    installStrategy: 'nested',
     // Don't run install scripts by default — same posture as ppm's old
     // `--production` install, which doesn't trigger lifecycle scripts for
     // packages we don't trust.
