@@ -120,9 +120,26 @@ Pulsar Package Manager powered by https://pulsar-edit.dev
   return options;
 }
 
-function showHelp(options) {
+async function showHelp(options) {
   if (options == null) return;
-  let help = options.help();
+  // yargs v17 changed `.help()` from a getter (older versions) into a
+  // configuration setter that returns the chainable instance. The async
+  // `.getHelp()` is the v17 way to render the formatted text; fall back
+  // to the legacy synchronous shape just in case.
+  let help;
+  try {
+    if (typeof options.getHelp === 'function') {
+      help = await options.getHelp();
+    } else if (typeof options.help === 'function') {
+      const result = options.help();
+      if (typeof result === 'string') help = result;
+    }
+  } catch (_) {}
+
+  if (typeof help !== 'string') {
+    if (typeof options.showHelp === 'function') options.showHelp('error');
+    return;
+  }
   if (help.indexOf('Options:') >= 0) {
     help += '\n  Prefix an option with `no-` to set it to false such as --no-color to disable';
     help += '\n  colored output.';
@@ -233,21 +250,22 @@ module.exports = {
 
     args = options.argv;
     const { command } = options;
+    // `showHelp` is async (yargs v17's `getHelp()` returns a Promise),
+    // so wrap each help branch in a Promise chain that waits for the
+    // help text to flush before firing the callback.
     try {
       if (args.version) {
         return printVersions(args).then(errorHandler, errorHandler);
       } else if (args.help) {
         const Command = loadCommand(options.command);
-        if (Command) showHelp(new Command().parseOptions?.(options.command));
-        else showHelp(options);
-        return errorHandler();
+        const target = Command ? new Command().parseOptions?.(options.command) : options;
+        return showHelp(target).then(errorHandler, errorHandler);
       } else if (command) {
         if (command === 'help') {
           const helpTarget = Array.isArray(options.commandArgs) ? options.commandArgs[0] : options.commandArgs;
           const Command = loadCommand(helpTarget);
-          if (Command) showHelp(new Command().parseOptions?.(helpTarget));
-          else showHelp(options);
-          return errorHandler();
+          const target = Command ? new Command().parseOptions?.(helpTarget) : options;
+          return showHelp(target).then(errorHandler, errorHandler);
         }
         const Command = loadCommand(command);
         if (Command) {
@@ -258,8 +276,7 @@ module.exports = {
         }
         return errorHandler(`Unrecognized command: ${command}`);
       } else {
-        showHelp(options);
-        return errorHandler();
+        return showHelp(options).then(errorHandler, errorHandler);
       }
     } catch (e) {
       return errorHandler(e);
