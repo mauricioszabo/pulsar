@@ -23,7 +23,7 @@ async function runCli(argv) {
   try { cli = loadCli(); }
   catch (e) {
     process.stderr.write(`ppm: failed to load package manager: ${e.message}\n`);
-    process.stderr.write('Hint: run `yarn install` in the Pulsar source directory to install package-manager dependencies.\n');
+    process.stderr.write('Hint: run `yarn install` in the Pulsar source directory to install ppm dependencies.\n');
     return 1;
   }
   return new Promise((resolve) => {
@@ -75,7 +75,7 @@ async function runCommand(args, opts = {}) {
   } catch (e) {
     code = 1;
     const msg = e?.message?.includes('Cannot find module')
-      ? `${e.message}\nHint: run \`yarn install\` in the Pulsar source directory to install package-manager dependencies.`
+      ? `${e.message}\nHint: run \`yarn install\` in the Pulsar source directory to install ppm dependencies.`
       : String(e?.stack || e?.message || e);
     stderrChunks.push(msg);
     if (typeof opts.onProgress === 'function') {

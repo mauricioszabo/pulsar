@@ -139,7 +139,7 @@ ipcMain.handle('setAsDefaultProtocolClient', (_, { protocol, path, args }) => {
 // In-process package-manager handler. Settings View and other renderer-side
 // callers used to spawn the `ppm` binary via `BufferedProcess`; now they
 // invoke `runCommand(args, opts)` here and get the captured stdout/stderr
-// back through the IPC reply. See `src/package-manager-cli/index.js`.
+// back through the IPC reply. See `src/ppm/index.js`.
 //
 // The caller may pass an `id` so we can stream each stdout/stderr chunk
 // back through the `package-manager:progress` channel as it arrives,
@@ -158,7 +158,7 @@ ipcMain.handle('package-manager:run', async (event, { id, args, opts }) => {
   // would otherwise reject the invoke promise with no useful detail, and
   // the renderer would see an empty list with no clue why.
   try {
-    return await require('../package-manager-cli').runCommand(args, callOpts);
+    return await require('../ppm').runCommand(args, callOpts);
   } catch (e) {
     return { code: 1, stdout: '', stderr: String(e?.stack || e?.message || e) };
   }

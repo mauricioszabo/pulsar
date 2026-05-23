@@ -42,7 +42,7 @@ module.exports = {
         return Promise.resolve(cachedResourcePath);
       }
     } catch (_) {}
-    // Last-ditch: walk up from this file. src/package-manager-cli -> src -> repo root.
+    // Last-ditch: walk up from this file. src/ppm -> src -> repo root.
     cachedResourcePath = path.resolve(__dirname, '..', '..');
     return Promise.resolve(cachedResourcePath);
   },

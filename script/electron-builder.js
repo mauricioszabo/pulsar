@@ -8,7 +8,7 @@ const generateMetadata = require('./generate-metadata-for-builder')
 const macBundleDocumentTypes = require("./mac-bundle-document-types.js");
 
 // The legacy `ppm` submodule check is gone — the package manager now lives
-// in `src/package-manager-cli/` and runs on Electron's bundled Node. The
+// in `src/ppm/` and runs on Electron's bundled Node. The
 // thin `ppm`/`ppm.cmd` wrapper scripts still live at `ppm/bin/` so the
 // path matches what the previous submodule provided.
 

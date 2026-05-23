@@ -4,7 +4,7 @@ let deprecatedPackages = null;
 
 exports.isDeprecatedPackage = function(name, version) {
   // In the ppm submodule this lived one directory up (in `ppm/`); now it
-  // sits next to the loader at `src/package-manager-cli/deprecated-packages.json`.
+  // sits next to the loader at `src/ppm/deprecated-packages.json`.
   deprecatedPackages ??= require("./deprecated-packages.json") ?? {};
   if (!deprecatedPackages.hasOwnProperty(name)) { return false; }
 

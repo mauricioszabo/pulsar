@@ -166,8 +166,8 @@ module.exports = function parseCommandLine(processArgs) {
 
     // Run the package manager in this same Electron main process — no
     // child Node, no separate npm CLI. The new in-process module lives at
-    // `src/package-manager-cli/` and exposes `runCli(argv) -> Promise<exitCode>`.
-    require('../package-manager-cli').runCli(ppmArgs).then(
+    // `src/ppm/` and exposes `runCli(argv) -> Promise<exitCode>`.
+    require('../ppm').runCli(ppmArgs).then(
       code => process.exit(code ?? 0),
       err => { console.error(err?.stack || err?.message || err); process.exit(1); }
     );
