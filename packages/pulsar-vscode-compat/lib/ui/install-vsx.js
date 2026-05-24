@@ -52,7 +52,8 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
     }
 
     try {
-      const extPkgPath = path.join(tmpDir, 'extension', 'package.json');
+      const extensionDir = path.join(tmpDir, 'extension');
+      const extPkgPath = path.join(extensionDir, 'package.json');
       if (!fs.existsSync(extPkgPath))
         throw new Error('Missing extension/package.json inside VSIX');
 
@@ -63,6 +64,7 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
       const extVersion   = extMeta.version     || '0.0.0';
       const extDesc      = extMeta.description || '';
       const activationEvents = extMeta.activationEvents || ['*'];
+      const icon = normalizeRelativePath(extMeta.icon);
 
       const pulsarPkgName = `vscode-${extPublisher}-${extName}`;
       const outDir = path.join(destDir, pulsarPkgName);
@@ -74,10 +76,14 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
       fs.mkdirSync(path.join(outDir, 'lib'), { recursive: true });
 
       onProgress('Copying extension files…');
-      fs.cpSync(path.join(tmpDir, 'extension'), path.join(outDir, 'extension'), { recursive: true });
+      fs.cpSync(extensionDir, path.join(outDir, 'extension'), { recursive: true });
 
       const atomConfig    = buildAtomConfig(extMeta.contributes);
       const configSections = getConfigSections(extMeta.contributes);
+      const displayName = extMeta.displayName || extName;
+      const repository = normalizeRepository(extMeta.repository);
+      const bugs = normalizeBugs(extMeta.bugs);
+      const homepage = extMeta.homepage || (repository && (typeof repository === 'string' ? repository : repository.url));
 
       const pulsarPkg = {
         name: pulsarPkgName,
@@ -85,19 +91,43 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
         description: `[VSCode compat] ${extDesc}`,
         main: './lib/main.js',
         engines: { atom: '>=1.0.0 <2.0.0' },
+        displayName,
+        author: extMeta.author,
+        license: extMeta.license,
+        repository,
+        bugs,
+        homepage,
+        keywords: Array.isArray(extMeta.keywords) ? extMeta.keywords : undefined,
+        categories: Array.isArray(extMeta.categories) ? extMeta.categories : undefined,
+        icon: icon ? path.posix.join('extension', icon) : undefined,
         _vscodeExtension: {
           id: `${extPublisher}.${extName}`,
           name: extName,
           publisher: extPublisher,
+          displayName,
+          description: extDesc,
+          icon,
           main: extMain,
           activationEvents,
           configSections,
         },
       };
-      if (Object.keys(atomConfig).length) pulsarPkg.config = atomConfig;
+      if (Object.keys(atomConfig).length) {
+        // Pulsar/Atom reads package configuration schemas from package.json's
+        // `configSchema` metadata during package load. A `config` key in
+        // package.json is ignored; `config` is only read from the package's main
+        // module after it has been required. Store the schema under
+        // `configSchema` so Settings View can show VSCode extension settings as
+        // soon as the wrapper package is loaded.
+        pulsarPkg.configSchema = atomConfig;
+      }
 
+      pruneUndefined(pulsarPkg);
       fs.writeFileSync(path.join(outDir, 'package.json'), JSON.stringify(pulsarPkg, null, 2));
       fs.writeFileSync(path.join(outDir, 'lib', 'main.js'), generateWrapperMain());
+      writePulsarReadme(extensionDir, outDir, extMeta, pulsarPkg);
+      copyTopLevelDoc(extensionDir, outDir, ['CHANGELOG', 'HISTORY']);
+      copyTopLevelDoc(extensionDir, outDir, ['LICENSE', 'LICENCE', 'COPYING']);
 
       onProgress(`Installed as ${pulsarPkgName}`);
       resolve(pulsarPkgName);
@@ -152,17 +182,19 @@ function convertSchema(schema) {
   const out = {};
 
   if (Array.isArray(schema.type)) {
-    out.type = typeMap[schema.type.find(t => t !== 'null')] || 'string';
+    out.type = typeMap[schema.type.find(t => t !== 'null')] || inferAtomType(schema) || 'string';
   } else {
-    out.type = typeMap[schema.type] || 'string';
+    out.type = typeMap[schema.type] || inferAtomType(schema) || 'string';
   }
 
   if (schema.default     !== undefined) out.default     = schema.default;
-  if (schema.description)               out.description = schema.description;
-  else if (schema.markdownDescription)  out.description = schema.markdownDescription;
+  if (schema.title)                     out.title       = normalizeMarkdownText(schema.title);
+  if (schema.description)               out.description = normalizeMarkdownText(schema.description);
+  else if (schema.markdownDescription)  out.description = normalizeMarkdownText(schema.markdownDescription);
   if (schema.enum)                      out.enum        = schema.enum;
   if (schema.minimum     !== undefined) out.minimum     = schema.minimum;
   if (schema.maximum     !== undefined) out.maximum     = schema.maximum;
+  if (schema.order       !== undefined) out.order       = schema.order;
 
   if (out.type === 'array' && schema.items) out.items = convertSchema(schema.items);
   if (out.type === 'object' && schema.properties) {
@@ -173,19 +205,152 @@ function convertSchema(schema) {
   return out;
 }
 
+function inferAtomType(schema) {
+  if (Array.isArray(schema.enum) && schema.enum.length) {
+    const firstDefined = schema.enum.find(v => v !== null && v !== undefined);
+    if (Array.isArray(firstDefined)) return 'array';
+    return typeof firstDefined;
+  }
+  if (schema.default !== undefined && schema.default !== null) {
+    if (Array.isArray(schema.default)) return 'array';
+    return typeof schema.default;
+  }
+  if (schema.properties) return 'object';
+  if (schema.items) return 'array';
+  return null;
+}
+
+function normalizeMarkdownText(value) {
+  if (Array.isArray(value)) return value.map(normalizeMarkdownText).join('\n\n');
+  if (value == null) return '';
+  return String(value);
+}
+
+// ─── Package metadata/readme conversion ───────────────────────────────────────
+
+function normalizeRelativePath(value) {
+  if (!value || typeof value !== 'string') return null;
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!normalized || normalized.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(normalized)) return null;
+  if (normalized.split('/').some(part => part === '..')) return null;
+  return normalized;
+}
+
+function normalizeRepository(repository) {
+  if (!repository) return undefined;
+  if (typeof repository === 'string') return repository;
+  if (typeof repository === 'object' && repository.url) {
+    return {
+      type: repository.type || 'git',
+      url: repository.url,
+    };
+  }
+  return undefined;
+}
+
+function normalizeBugs(bugs) {
+  if (!bugs) return undefined;
+  if (typeof bugs === 'string') return { url: bugs };
+  if (typeof bugs === 'object' && bugs.url) return { url: bugs.url };
+  return undefined;
+}
+
+function pruneUndefined(value) {
+  if (!value || typeof value !== 'object') return value;
+  for (const key of Object.keys(value)) {
+    if (value[key] === undefined) delete value[key];
+    else if (value[key] && typeof value[key] === 'object' && !Array.isArray(value[key])) pruneUndefined(value[key]);
+  }
+  return value;
+}
+
+function findTopLevelDoc(extensionDir, basenames) {
+  for (const child of fs.readdirSync(extensionDir)) {
+    const ext = path.extname(child);
+    const base = path.basename(child, ext).toUpperCase();
+    if (basenames.includes(base)) {
+      const fullPath = path.join(extensionDir, child);
+      if (fs.statSync(fullPath).isFile()) return fullPath;
+    }
+  }
+  return null;
+}
+
+function copyTopLevelDoc(extensionDir, outDir, basenames) {
+  const src = findTopLevelDoc(extensionDir, basenames);
+  if (!src) return;
+  const dest = path.join(outDir, path.basename(src));
+  if (fs.existsSync(dest)) return;
+  fs.copyFileSync(src, dest);
+}
+
+function writePulsarReadme(extensionDir, outDir, extMeta, pulsarPkg) {
+  const readmePath = findTopLevelDoc(extensionDir, ['README']);
+  let readme = readmePath ? fs.readFileSync(readmePath, 'utf8') : '';
+  readme = rewriteReadmeResourceLinks(readme);
+
+  const header = buildPulsarReadmeHeader(extMeta, pulsarPkg);
+  fs.writeFileSync(path.join(outDir, 'README.md'), `${header}${readme || 'No README was included in the VSIX.\n'}`);
+}
+
+function buildPulsarReadmeHeader(extMeta, pulsarPkg) {
+  const title = extMeta.displayName || extMeta.name || pulsarPkg.name;
+  const icon = normalizeRelativePath(extMeta.icon);
+  const iconHtml = icon ? `<p align="center"><img src="extension/${escapeHtmlAttribute(icon)}" alt="${escapeHtmlAttribute(title)} icon" width="96" height="96"></p>\n\n` : '';
+  const description = extMeta.description ? `\n\n> ${String(extMeta.description).replace(/\n/g, ' ')}` : '';
+  return `${iconHtml}# ${title}${description}\n\n---\n\n`;
+}
+
+function rewriteReadmeResourceLinks(markdown) {
+  if (!markdown) return '';
+  let out = markdown.replace(/(!?\[[^\]]*\]\()\s*([^\s)]+)(\s*(?:"[^"]*"|'[^']*')?\))/g, (match, prefix, target, suffix) => {
+    return `${prefix}${prefixReadmeTarget(target)}${suffix}`;
+  });
+  out = out.replace(/\b(src|href)=(['"])([^'"]+)\2/gi, (match, attr, quote, target) => {
+    return `${attr}=${quote}${prefixReadmeTarget(target)}${quote}`;
+  });
+  return out;
+}
+
+function prefixReadmeTarget(target) {
+  const cleaned = String(target || '').replace(/^<|>$/g, '');
+  if (!cleaned || cleaned.startsWith('#') || cleaned.startsWith('//') || cleaned.startsWith('/')) return target;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(cleaned)) return target;
+  if (cleaned.startsWith('extension/')) return cleaned;
+  const match = cleaned.match(/^([^?#]*)([?#].*)?$/);
+  const resource = normalizeRelativePath(match ? match[1] : cleaned);
+  if (!resource) return target;
+  return `extension/${resource}${match && match[2] ? match[2] : ''}`;
+}
+
+function escapeHtmlAttribute(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // ─── Generated wrapper main.js ────────────────────────────────────────────────
 
 function generateWrapperMain() {
   return `'use strict';
 
 const path = require('path');
-const meta = require('../package.json')._vscodeExtension;
+const packageMeta = require('../package.json');
+const meta = packageMeta._vscodeExtension;
 const extensionPath = path.join(__dirname, '..', 'extension');
 
 let _context = null;
 let _vsext = null;
 
 module.exports = {
+  // Pulsar also registers configuration schemas from the main module config
+  // property when Settings View calls pack.activateConfig(). Keep this here as
+  // a compatibility fallback for wrapper packages generated with older metadata
+  // shapes, while new packages expose the schema as package.json configSchema.
+  config: packageMeta.configSchema || packageMeta.config,
+
   activate(state) {
     const mainFile = path.resolve(extensionPath, meta.main);
     try {
