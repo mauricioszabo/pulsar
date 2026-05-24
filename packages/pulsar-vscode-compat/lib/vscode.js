@@ -112,8 +112,17 @@ const FileWillCreateEvent = class {};
 const FileWillDeleteEvent = class {};
 const FileWillRenameEvent = class {};
 const WindowState = class { constructor(focused) { this.focused = focused; } };
-const RelativePattern = class { constructor(base, pattern) { this.base = base; this.pattern = pattern; } };
+const RelativePattern = class {
+  constructor(base, pattern) {
+    this.base = base;
+    this.baseUri = base && base.uri ? base.uri : base;
+    this.pattern = pattern;
+  }
+};
 const GlobPattern = RelativePattern;
+const TelemetryTrustedValue = class {
+  constructor(value) { this.value = value; }
+};
 const TabInputText = class { constructor(uri) { this.uri = uri; } };
 const TabInputNotebook = class { constructor(uri, notebookType) { this.uri = uri; this.notebookType = notebookType; } };
 const TabInputCustom = class { constructor(uri, viewType) { this.uri = uri; this.viewType = viewType; } };
@@ -481,6 +490,7 @@ const vscode = {
   EvaluatableExpression,
   WorkspaceSymbol,
   RelativePattern,
+  TelemetryTrustedValue,
   FileDecoration,
   DataTransfer,
   DataTransferItem,

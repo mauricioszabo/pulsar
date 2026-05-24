@@ -209,18 +209,43 @@ function wrapEditor(atomEditor) {
   return atomEditor ? new TextEditor(atomEditor) : undefined;
 }
 
+function viewColumnToSplit(viewColumn) {
+  if (viewColumn === ViewColumn.Beside || viewColumn === ViewColumn.Two) return 'right';
+  return undefined;
+}
+
 async function showTextDocument(documentOrUri, optionsOrColumn, preserveFocus) {
   let filePath;
+  let atomEditor;
   if (documentOrUri instanceof TextDocument) {
+    atomEditor = documentOrUri._editor;
     filePath = documentOrUri.fileName;
   } else if (documentOrUri && documentOrUri.fsPath) {
     filePath = documentOrUri.fsPath;
   } else if (typeof documentOrUri === 'string') {
     filePath = documentOrUri;
   }
-  const opts = typeof optionsOrColumn === 'object' ? optionsOrColumn : {};
+  const opts = typeof optionsOrColumn === 'object' ? optionsOrColumn : { viewColumn: optionsOrColumn };
   const activate = !(opts.preserveFocus || preserveFocus);
-  const editor = await atom.workspace.open(filePath, { activatePane: activate, activateItem: activate });
+
+  if (atomEditor) {
+    const openOptions = { activatePane: activate, activateItem: activate };
+    const split = viewColumnToSplit(opts.viewColumn);
+    if (split) openOptions.split = split;
+    const previousPane = atom.workspace.getActivePane && atom.workspace.getActivePane();
+    const previousItem = previousPane && previousPane.getActiveItem && previousPane.getActiveItem();
+    const openedEditor = await atom.workspace.open(atomEditor, openOptions);
+    if (!activate && previousPane && typeof previousPane.activate === 'function') {
+      previousPane.activate();
+      if (previousItem && typeof previousPane.activateItem === 'function') previousPane.activateItem(previousItem);
+    }
+    return wrapEditor(openedEditor || atomEditor);
+  }
+
+  const openOptions = { activatePane: activate, activateItem: activate };
+  const split = viewColumnToSplit(opts.viewColumn);
+  if (split) openOptions.split = split;
+  const editor = await atom.workspace.open(filePath, openOptions);
   return wrapEditor(editor);
 }
 

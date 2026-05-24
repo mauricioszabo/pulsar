@@ -98,17 +98,19 @@ function createCommandListener(command, didDispatch) {
   const contribution = getCommandMetadata(command);
   const displayName = getCommandDisplayName(contribution);
   const description = getCommandDescription(contribution);
-  const tags = contribution
-    ? [contribution.command, contribution.category, contribution.title, contribution.shortTitle]
-      .filter(value => typeof value === 'string' && value.length > 0)
-    : undefined;
+
+  // Intentionally not setting `tags`: command-palette renders a "matching
+  // tags: <id>" secondary row for any descriptor with non-empty tags, and the
+  // raw command id (calva.connect, rubyLsp.showSyntaxTree) makes that row
+  // noisy and unhelpful. The displayName already includes
+  // "category: title", which the palette scores against directly, so search
+  // relevance for VSCode commands is unaffected by omitting tags.
 
   const extensionMetadata = contribution && contribution._vscodeExtension;
 
   return {
     ...(displayName ? { displayName } : {}),
     ...(description ? { description } : {}),
-    ...(tags && tags.length > 0 ? { tags } : {}),
     ...(extensionMetadata ? {
       vscodeExtensionCommand: true,
       vscodeCommand: command,
@@ -222,6 +224,10 @@ function registerTextEditorCommand(command, callback) {
 }
 
 function executeCommand(command, ...args) {
+  if (command === 'vscode.executeCompletionItemProvider') {
+    return require('./languages')._executeCompletionItemProvider(...args);
+  }
+
   // If it's a registered VSCode command, call it directly
   if (commandRegistry.has(command)) {
     try {

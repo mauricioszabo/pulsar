@@ -7,6 +7,7 @@ const { TextDocument, grammarToLanguageId } = require('../types/text-document');
 const { Position } = require('../types/position');
 const { Range } = require('../types/range');
 const { CancellationTokenSource } = require('../types/cancellation');
+const { CompletionList } = require('../types/completion');
 const { matchesSelector } = require('../utils/selector');
 const { makeAutocompleteProvider } = require('../adapters/completion-adapter');
 const { registerHoverProvider: _registerHover } = require('../adapters/hover-adapter');
@@ -42,6 +43,47 @@ const foldingProviders = [];
 const signatureHelpProviders = [];
 // Link providers
 const linkProviders = [];
+
+const completionProviderProxy = {
+  selector: '*',
+  triggerCharacters: [],
+  inclusionPriority: 1,
+  excludeLowerPriority: false,
+
+  async getSuggestions(request) {
+    const results = [];
+    for (const provider of completionProviders.slice()) {
+      if (!provider || typeof provider.getSuggestions !== 'function') continue;
+      try {
+        const suggestions = await provider.getSuggestions(request);
+        if (Array.isArray(suggestions) && suggestions.length) {
+          for (const suggestion of suggestions) {
+            if (suggestion && !suggestion._vscodeAtomProvider) suggestion._vscodeAtomProvider = provider;
+            results.push(suggestion);
+          }
+        }
+      } catch (e) {
+        console.error('[vscode-compat] completion proxy error:', e);
+      }
+    }
+    return results.length ? results : null;
+  },
+
+  async getSuggestionDetailsOnSelect(suggestion) {
+    const provider = suggestion && suggestion._vscodeAtomProvider;
+    if (provider && typeof provider.resolveCompletionItem === 'function') {
+      return provider.resolveCompletionItem(suggestion);
+    }
+    return suggestion;
+  },
+
+  onDidInsertSuggestion(args) {
+    const provider = args && args.suggestion && args.suggestion._vscodeAtomProvider;
+    if (provider && typeof provider.onDidInsertSuggestion === 'function') {
+      return provider.onDidInsertSuggestion(args);
+    }
+  }
+};
 
 // ---- Public API ----
 
@@ -118,6 +160,32 @@ function registerCompletionItemProvider(documentSelector, provider, ...triggerCh
     const idx = completionProviders.indexOf(atomProvider);
     if (idx >= 0) completionProviders.splice(idx, 1);
   });
+}
+
+async function executeCompletionItemProvider(uri, position, triggerCharacter) {
+  const workspace = require('./workspace');
+  const document = await workspace.openTextDocument(uri);
+  const pos = position instanceof Position
+    ? position
+    : new Position(position && position.line || 0, position && position.character || 0);
+  const tokenSource = new CancellationTokenSource();
+  const items = [];
+  let isIncomplete = false;
+
+  for (const provider of completionProviders.slice()) {
+    if (!provider || typeof provider._provideVSCodeCompletionItems !== 'function') continue;
+    try {
+      const result = await provider._provideVSCodeCompletionItems(document, pos, triggerCharacter, tokenSource.token);
+      if (!result) continue;
+      const providerItems = Array.isArray(result) ? result : result.items || [];
+      items.push(...providerItems);
+      isIncomplete = isIncomplete || !!result.isIncomplete;
+    } catch (e) {
+      console.error('[vscode-compat] executeCompletionItemProvider error:', e);
+    }
+  }
+
+  return new CompletionList(items, isIncomplete);
 }
 
 function registerHoverProvider(documentSelector, provider) {
@@ -475,7 +543,10 @@ module.exports = {
   registerInlineValuesProvider,
 
   // Internal accessors for service provision
-  _completionProviders: completionProviders,
+  _completionProviders: [completionProviderProxy],
+  _registeredCompletionProviders: completionProviders,
+  _completionProviderProxy: completionProviderProxy,
+  _executeCompletionItemProvider: executeCompletionItemProvider,
   _symbolProviders: symbolProviders,
   _setLinterIndie(indie) {
     _linterIndie = indie;

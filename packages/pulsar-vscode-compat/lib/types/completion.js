@@ -11,7 +11,8 @@ const CompletionItemKind = Object.freeze({
 const CompletionItemTag = Object.freeze({ Deprecated: 1 });
 
 const CompletionTriggerKind = Object.freeze({
-  Invoke: 0, TriggerCharacter: 1, TriggerForIncompleteCompletions: 2
+  // VS Code and LSP both use 1-based completion trigger kind values.
+  Invoke: 1, TriggerCharacter: 2, TriggerForIncompleteCompletions: 3
 });
 
 class CompletionItem {

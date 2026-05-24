@@ -34,13 +34,45 @@ const KIND_MAP = {
   [CompletionItemKind.TypeParameter]: 'type'
 };
 
+function completionContext(triggerCharacter, activatedManually) {
+  const isTriggerCharacter = !!triggerCharacter && !activatedManually;
+  return {
+    triggerKind: isTriggerCharacter ? CompletionTriggerKind.TriggerCharacter : CompletionTriggerKind.Invoke,
+    triggerCharacter: isTriggerCharacter ? triggerCharacter : undefined
+  };
+}
+
+function normalizeCompletionResult(result) {
+  if (!result) return { items: [], isIncomplete: false };
+  if (Array.isArray(result)) return { items: result, isIncomplete: false };
+  return {
+    items: Array.isArray(result.items) ? result.items : [],
+    isIncomplete: !!result.isIncomplete
+  };
+}
+
 function makeAutocompleteProvider(documentSelector, vscodeProvider, triggerChars) {
   const selector = buildAtomSelector(documentSelector);
-  return {
+  const atomProvider = {
     selector,
     triggerCharacters: triggerChars || [],
     inclusionPriority: 1,
     excludeLowerPriority: false,
+    _vscodeDocumentSelector: documentSelector,
+    _vscodeProvider: vscodeProvider,
+
+    async _provideVSCodeCompletionItems(doc, pos, triggerCharacter, token) {
+      const editor = doc && doc._editor;
+      const grammar = editor && editor.getGrammar && editor.getGrammar();
+      if (grammar && !matchesSelector(grammar.scopeName, documentSelector)) return { items: [], isIncomplete: false };
+      const result = await vscodeProvider.provideCompletionItems(
+        doc,
+        pos,
+        token,
+        completionContext(triggerCharacter, false)
+      );
+      return normalizeCompletionResult(result);
+    },
 
     async getSuggestions({ editor, bufferPosition, triggerCharacter, activatedManually }) {
       const grammar = editor.getGrammar();
@@ -49,17 +81,14 @@ function makeAutocompleteProvider(documentSelector, vscodeProvider, triggerChars
       const doc = new TextDocument(editor);
       const pos = new Position(bufferPosition.row, bufferPosition.column);
       const tokenSource = new CancellationTokenSource();
-      const context = {
-        triggerKind: activatedManually ? CompletionTriggerKind.Invoke : CompletionTriggerKind.TriggerCharacter,
-        triggerCharacter
-      };
+      const context = completionContext(triggerCharacter, activatedManually);
 
       try {
         let result = await vscodeProvider.provideCompletionItems(doc, pos, tokenSource.token, context);
         if (!result) return null;
 
-        const items = Array.isArray(result) ? result : result.items || [];
-        return items.map(item => convertItem(item, editor, bufferPosition));
+        const { items } = normalizeCompletionResult(result);
+        return items.map(item => convertItem(item, editor, bufferPosition, atomProvider));
       } catch (e) {
         console.error('[vscode-compat] completion error:', e);
         return null;
@@ -72,7 +101,7 @@ function makeAutocompleteProvider(documentSelector, vscodeProvider, triggerChars
         const tokenSource = new CancellationTokenSource();
         const resolved = await vscodeProvider.resolveCompletionItem(suggestion._vscodeItem, tokenSource.token);
         if (resolved) {
-          return convertItem(resolved, suggestion._editor, suggestion._bufferPosition);
+          return convertItem(resolved, suggestion._editor, suggestion._bufferPosition, atomProvider);
         }
       } catch (e) {}
       return suggestion;
@@ -84,9 +113,11 @@ function makeAutocompleteProvider(documentSelector, vscodeProvider, triggerChars
       }
     }
   };
+
+  return atomProvider;
 }
 
-function convertItem(item, editor, bufferPosition) {
+function convertItem(item, editor, bufferPosition, atomProvider) {
   const label = typeof item.label === 'string' ? item.label : (item.label && item.label.label) || '';
   let insertText;
   if (item.insertText) {
@@ -97,22 +128,62 @@ function convertItem(item, editor, bufferPosition) {
 
   const isSnippet = item.insertText && typeof item.insertText !== 'string';
 
-  let description = '';
-  if (item.documentation) {
-    description = typeof item.documentation === 'string' ? item.documentation : item.documentation.value;
-  }
+  const documentationMarkdown = completionDocumentationToMarkdown(item.documentation);
 
   return {
     text: isSnippet ? undefined : insertText,
     snippet: isSnippet ? insertText : undefined,
     displayText: label,
     type: KIND_MAP[item.kind] || 'value',
-    description: description,
+    description: documentationMarkdown || '',
+    descriptionMarkdown: documentationMarkdown || undefined,
     rightLabel: item.detail || '',
     _vscodeItem: item,
+    _vscodeAtomProvider: atomProvider,
     _editor: editor,
     _bufferPosition: bufferPosition
   };
+}
+
+function completionDocumentationToMarkdown(documentation) {
+  if (documentation == null) return '';
+
+  if (documentation.language && documentation.value !== undefined) {
+    const language = String(documentation.language || '').trim();
+    const value = String(documentation.value);
+    const fence = '`'.repeat(longestBacktickRun(value) + 1);
+    return normalizeCompletionMarkdown(`${fence}${language}\n${value}\n${fence}`);
+  }
+
+  const value = documentation.value !== undefined ? documentation.value : documentation;
+  if (value == null) return '';
+  return normalizeCompletionMarkdown(String(value));
+}
+
+function normalizeCompletionMarkdown(markdown) {
+  return String(markdown).replace(/\[([^\]\n]+)\]\((file:\/\/[^\s)]+)\)/g, (_match, label, href) => {
+    return `<a href="${escapeHtmlAttribute(href)}">${escapeHtml(label)}</a>`;
+  });
+}
+
+function longestBacktickRun(text) {
+  const matches = String(text).match(/`+/g);
+  return matches ? Math.max(...matches.map(match => match.length)) : 2;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>]/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;'
+  }[char]));
+}
+
+function escapeHtmlAttribute(value) {
+  return escapeHtml(value).replace(/["']/g, char => ({
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
 }
 
 function buildAtomSelector(documentSelector) {

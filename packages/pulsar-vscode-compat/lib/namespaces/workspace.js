@@ -6,6 +6,7 @@ const { getTextDocument, forgetTextDocument } = require('../types/text-document'
 const { WorkspaceEdit } = require('../types/workspace-edit');
 const { FileSystemWatcher } = require('../types/file-system-watcher');
 const { Disposable } = require('../types/disposable');
+const { CancellationTokenSource } = require('../types/cancellation');
 const { Range } = require('../types/range');
 const { Position } = require('../types/position');
 const path = require('path');
@@ -210,6 +211,29 @@ function _ensureTextDocument(editor) {
   return document;
 }
 
+function makeVirtualTextEditor(uri, content) {
+  const editor = atom.workspace.buildTextEditor({ autoHeight: false });
+  editor._vscodeUri = uri;
+  editor._vscodeTitle = path.basename(uri.path || '') || uri.authority || uri.scheme;
+  editor.getURI = () => uri.toString();
+  editor.getTitle = () => editor._vscodeTitle;
+  editor.setText(content || '');
+
+  // VSCode TextDocumentContentProvider documents are readonly virtual
+  // documents. They should be scrollable/selectable, but not user-editable.
+  if (typeof editor.setReadOnly === 'function') editor.setReadOnly(true);
+
+  // Atom/Pulsar considers any non-empty untitled buffer modified, even if it is
+  // readonly. Virtual provider documents do not have a real file to save, so they
+  // must also opt out of dirty/save prompting at the pane item level.
+  editor.isModified = () => false;
+  editor.shouldPromptToSave = () => false;
+  editor.save = () => Promise.resolve(editor);
+  editor.saveAs = () => Promise.resolve(editor);
+
+  return editor;
+}
+
 function openTextDocument(uriOrPathOrOptions) {
   // VSCode's workspace.openTextDocument creates an in-memory TextDocument
   // model without opening a visible editor — display only happens via
@@ -223,6 +247,15 @@ function openTextDocument(uriOrPathOrOptions) {
     return Promise.resolve(getTextDocument(atom.workspace.buildTextEditor()));
   } else if (typeof uriOrPathOrOptions === 'string') {
     filePath = uriOrPathOrOptions;
+  } else if (uriOrPathOrOptions.scheme && uriOrPathOrOptions.scheme !== 'file') {
+    const uri = uriOrPathOrOptions;
+
+    const provider = contentProviders.get(uri.scheme);
+    const contentPromise = provider && typeof provider.provideTextDocumentContent === 'function'
+      ? Promise.resolve(provider.provideTextDocumentContent(uri, new CancellationTokenSource().token))
+      : Promise.resolve(uri.query || '');
+
+    return contentPromise.then(content => getTextDocument(makeVirtualTextEditor(uri, content)));
   } else if (uriOrPathOrOptions.fsPath) {
     filePath = uriOrPathOrOptions.fsPath;
   } else if (uriOrPathOrOptions.content !== undefined || uriOrPathOrOptions.language) {
@@ -494,11 +527,7 @@ function registerTextDocumentContentProvider(scheme, provider) {
     const { Uri: UriClass } = require('../types/uri');
     const vsUri = UriClass.parse(uri);
     return provider.provideTextDocumentContent(vsUri, new (require('../types/cancellation').CancellationTokenSource)().token)
-      .then(content => {
-        const editor = atom.workspace.buildTextEditor();
-        editor.setText(content || '');
-        return editor;
-      });
+      .then(content => makeVirtualTextEditor(vsUri, content));
   });
   return new Disposable(() => {
     contentProviders.delete(scheme);

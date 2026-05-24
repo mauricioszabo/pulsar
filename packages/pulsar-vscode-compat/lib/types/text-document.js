@@ -72,6 +72,7 @@ class TextDocument {
     // returning a fresh Uri on every access breaks those code paths — e.g.
     // Calva's onDidChangeTextDocument handler bails out unless
     // activeEditor.document.uri == event.document.uri.
+    if (this._editor._vscodeUri) return this._editor._vscodeUri;
     const p = this._editor.getPath();
     const title = p ? null : this._editor.getTitle();
     if (this._cachedUri && this._cachedUriPath === p && this._cachedUriTitle === title) {
@@ -83,7 +84,10 @@ class TextDocument {
     return this._cachedUri;
   }
 
-  get fileName() { return this._editor.getPath() || ''; }
+  get fileName() {
+    if (this._editor._vscodeUri) return this._editor._vscodeUri.fsPath || this._editor._vscodeUri.path || '';
+    return this._editor.getPath() || '';
+  }
   get isUntitled() { return !this._editor.getPath(); }
   get languageId() { return grammarToLanguageId(this._editor.getGrammar()); }
 
