@@ -45,6 +45,13 @@ const scm = require('./namespaces/scm');
 const debug = require('./namespaces/debug');
 const tasks = require('./namespaces/tasks');
 const tests = require('./namespaces/tests');
+const {
+  TestTag,
+  TestMessage,
+  TestRunRequest,
+  TestRunProfileKind,
+  TestResultState
+} = tests;
 const authentication = require('./namespaces/authentication');
 const comments = require('./namespaces/comments');
 const notebooks = require('./namespaces/notebooks');
@@ -65,7 +72,6 @@ const NotebookCellKind = Object.freeze({ Markup: 1, Code: 2 });
 const NotebookEditorRevealType = Object.freeze({ Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 });
 const NotebookControllerAffinity = Object.freeze({ Default: 1, Preferred: 2 });
 const DebugConfigurationType = Object.freeze({ Single: 'single', Multiple: 'multiple' });
-const TestRunProfileKind = Object.freeze({ Run: 1, Debug: 2, Coverage: 3 });
 const LanguageStatusSeverity = Object.freeze({ Information: 0, Warning: 1, Error: 2 });
 const QuickPickItemKind = Object.freeze({ Separator: -1, Default: 0 });
 const UIKind = Object.freeze({ Desktop: 1, Web: 2 });
@@ -441,6 +447,10 @@ const vscode = {
   NotebookEditorRevealType,
   NotebookControllerAffinity,
   TestRunProfileKind,
+  TestResultState,
+  TestTag,
+  TestMessage,
+  TestRunRequest,
   LanguageStatusSeverity,
   QuickPickItemKind,
   UIKind,

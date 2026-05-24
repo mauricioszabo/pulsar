@@ -80,6 +80,7 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
 
       const atomConfig    = buildAtomConfig(extMeta.contributes);
       const configSections = getConfigSections(extMeta.contributes);
+      const contributedCommandIds = getContributedCommandIds(extMeta.contributes);
       const displayName = extMeta.displayName || extName;
       const repository = normalizeRepository(extMeta.repository);
       const bugs = normalizeBugs(extMeta.bugs);
@@ -91,6 +92,9 @@ function wrapAndInstall(vsixPath, destDir, onProgress) {
         description: `[VSCode compat] ${extDesc}`,
         main: './lib/main.js',
         engines: { atom: '>=1.0.0 <2.0.0' },
+        activationCommands: contributedCommandIds.length
+          ? { 'atom-workspace': contributedCommandIds }
+          : undefined,
         displayName,
         author: extMeta.author,
         license: extMeta.license,
@@ -152,6 +156,18 @@ function getConfigSections(contributes) {
       if (prefix) names.add(prefix);
     }
   return Array.from(names);
+}
+
+function getContributedCommandIds(contributes) {
+  const commands = contributes && contributes.commands;
+  if (!Array.isArray(commands)) return [];
+  const ids = new Set();
+  for (const contribution of commands) {
+    if (contribution && typeof contribution.command === 'string' && contribution.command.trim()) {
+      ids.add(contribution.command);
+    }
+  }
+  return Array.from(ids);
 }
 
 function buildAtomConfig(contributes) {

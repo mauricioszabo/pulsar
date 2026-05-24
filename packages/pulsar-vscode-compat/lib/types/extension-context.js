@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { Uri } = require('./uri');
@@ -40,13 +41,52 @@ class EnvironmentVariableCollection {
   getScoped() { return new EnvironmentVariableCollection(); }
 }
 
+function readJsonIfExists(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+
+function findPackageJsonForExtensionPath(extensionPath) {
+  // VSIX wrapper packages keep the original VSCode extension under
+  // <pulsar-package>/extension. VSCode's Extension.packageJSON is the original
+  // extension manifest, not the generated Pulsar wrapper manifest.
+  const extensionManifest = readJsonIfExists(path.join(extensionPath, 'package.json'));
+  if (extensionManifest) return extensionManifest;
+
+  const wrapperManifest = readJsonIfExists(path.join(path.dirname(extensionPath), 'package.json'));
+  if (wrapperManifest) return wrapperManifest;
+
+  return { name: path.basename(extensionPath || ''), version: '0.0.0' };
+}
+
+function createFallbackExtension(extensionId, extensionPath) {
+  const packageJSON = findPackageJsonForExtensionPath(extensionPath);
+  const id = extensionId || (packageJSON.publisher && packageJSON.name
+    ? `${packageJSON.publisher}.${packageJSON.name}`
+    : packageJSON.name);
+
+  return {
+    id,
+    extensionUri: Uri.file(extensionPath),
+    extensionPath,
+    isActive: true,
+    packageJSON,
+    extensionKind: undefined,
+    exports: undefined,
+    activate() { return Promise.resolve(this.exports); }
+  };
+}
+
 class ExtensionContext {
   constructor(extensionId, extensionPath, extensionMode, savedState) {
     this.subscriptions = [];
     this.extensionPath = extensionPath;
     this.extensionUri = Uri.file(extensionPath);
     this.extensionMode = extensionMode || 1; // Production
-    this.extension = null; // set externally if needed
+    this.extension = createFallbackExtension(extensionId, extensionPath);
 
     const atomHome = process.env.ATOM_HOME || path.join(os.homedir(), '.pulsar');
     const storageRoot = path.join(atomHome, 'storage', 'vscode-compat');

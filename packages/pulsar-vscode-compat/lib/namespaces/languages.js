@@ -45,6 +45,35 @@ const linkProviders = [];
 
 // ---- Public API ----
 
+const languageStatusItems = [];
+
+class LanguageStatusItem {
+  constructor(id, selector) {
+    this.id = id;
+    this.selector = selector;
+    this.name = id;
+    this.text = '';
+    this.detail = '';
+    this.severity = 0;
+    this.busy = false;
+    this.command = undefined;
+    this.accessibilityInformation = undefined;
+    this._disposed = false;
+  }
+
+  dispose() {
+    this._disposed = true;
+    const idx = languageStatusItems.indexOf(this);
+    if (idx >= 0) languageStatusItems.splice(idx, 1);
+  }
+}
+
+function createLanguageStatusItem(id, selector) {
+  const item = new LanguageStatusItem(id, selector);
+  languageStatusItems.push(item);
+  return item;
+}
+
 function createDiagnosticCollection(name) {
   const collection = new DiagnosticCollection(name || 'vscode-compat', _linterIndie);
   diagnosticCollections.push(collection);
@@ -406,6 +435,7 @@ function registerInlineValuesProvider() { return new Disposable(() => {}); }
 
 module.exports = {
   createDiagnosticCollection,
+  createLanguageStatusItem,
   getDiagnostics,
   getLanguages,
   match,
