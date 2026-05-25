@@ -309,23 +309,46 @@ class ExtensionBrowserView {
 
     try {
       const { installFromOpenVsx } = require('./install-vsx');
-      await installFromOpenVsx(data.namespace, data.name, data.version, msg => {
+      const pkgName = await installFromOpenVsx(data.namespace, data.name, data.version, msg => {
         progressEl.innerHTML = this._inlineLoadingMarkup(msg);
         this._status(msg);
       });
 
-      btn.textContent = 'Installed ✓';
-      progressEl.textContent = 'Installed. Reload Pulsar to activate this extension.';
-      this._status(`Installed ${data.displayName || data.name}`);
+      try {
+        progressEl.innerHTML = this._inlineLoadingMarkup('Loading installed package…');
+        this._status(`Loading ${pkgName}…`);
 
-      atom.confirm(
-        {
-          message: `${data.displayName || data.name} installed`,
-          detail: 'Reload Pulsar to activate the extension.',
-          buttons: ['Reload Now', 'Later'],
-        },
-        response => { if (response === 0) atom.reload(); }
-      );
+        const pack = atom.packages.loadPackage(pkgName);
+        if (!pack) throw new Error(`Failed to load package '${pkgName}'`);
+
+        progressEl.innerHTML = this._inlineLoadingMarkup('Activating installed package…');
+        this._status(`Activating ${pkgName}…`);
+        await atom.packages.activatePackage(pkgName);
+
+        btn.textContent = 'Installed ✓';
+        progressEl.textContent = 'Installed and activated.';
+        this._status(`Installed and activated ${data.displayName || data.name}`);
+
+        atom.notifications.addSuccess(`${data.displayName || data.name} installed`, {
+          detail: 'The extension was loaded and activated without reloading Pulsar.',
+          dismissable: true,
+        });
+      } catch (activationError) {
+        console.warn('[vscode-compat] Installed extension but could not activate without reload:', activationError);
+
+        btn.textContent = 'Installed ✓';
+        progressEl.textContent = 'Installed. Reload Pulsar to activate this extension.';
+        this._status(`Installed ${data.displayName || data.name}; reload required`);
+
+        atom.confirm(
+          {
+            message: `${data.displayName || data.name} installed`,
+            detail: `Pulsar could not activate the extension immediately: ${activationError.message}\n\nReload Pulsar to activate it.`,
+            buttons: ['Reload Now', 'Later'],
+          },
+          response => { if (response === 0) atom.reload(); }
+        );
+      }
     } catch (e) {
       btn.disabled = false;
       btn.textContent = 'Retry';
