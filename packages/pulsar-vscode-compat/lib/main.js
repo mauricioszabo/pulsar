@@ -36,10 +36,6 @@ module.exports = {
 
   deactivate() {},
 
-  providePulsarApi() {
-    return { moduleName: 'vscode', score: 1, exportFunction: () => require('./vscode') };
-  },
-
   consumeStatusBar(service) {
     require('./namespaces/window').consumeStatusBar(service);
   },
