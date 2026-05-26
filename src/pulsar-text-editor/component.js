@@ -1055,11 +1055,12 @@ class PulsarTextEditorComponent {
     if (this._blinkInterval) clearInterval(this._blinkInterval);
     if (this._blinkResume) clearTimeout(this._blinkResume);
     this._blinkOff = false;
+    if (this._decorationsView) this._decorationsView.setBlink(false);
     this._blinkResume = setTimeout(() => {
       this._blinkInterval = setInterval(() => {
         if (!this.focused || !this.attached) return;
         this._blinkOff = !this._blinkOff;
-        this._scheduleUpdate();
+        this._decorationsView.setBlink(this._blinkOff);
       }, CURSOR_BLINK_PERIOD / 2);
     }, CURSOR_BLINK_RESUME_DELAY);
   }

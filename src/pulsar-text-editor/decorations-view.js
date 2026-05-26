@@ -45,13 +45,16 @@ class DecorationsView {
     if (this._highlightsEl.style.height !== hpx) this._highlightsEl.style.height = hpx;
     if (this._cursorsEl.style.height !== hpx) this._cursorsEl.style.height = hpx;
 
-    // Blink toggle.
-    const cursClass = 'cursors' + (blinkOff ? ' blink-off' : '');
-    if (this._cursorsEl.className !== cursClass) this._cursorsEl.className = cursClass;
+    this.setBlink(blinkOff);
 
     this._updateSelections(selectionRanges, lineHeight, charWidth, topForRow);
     this._updateHighlights(highlightDecos, lineHeight, charWidth, topForRow);
     this._updateCursors(cursorDescriptors, lineHeight, charWidth, topForRow);
+  }
+
+  setBlink(blinkOff) {
+    const cursClass = 'cursors' + (blinkOff ? ' blink-off' : '');
+    if (this._cursorsEl.className !== cursClass) this._cursorsEl.className = cursClass;
   }
 
   // ---- selections ----
