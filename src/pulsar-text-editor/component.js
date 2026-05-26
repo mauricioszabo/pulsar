@@ -10,7 +10,13 @@ const LinesView = require('./lines-view');
 const GutterView = require('./gutter-view');
 const DecorationsView = require('./decorations-view');
 const { createMeasurement } = require('./measurements');
-const { applyLineDecoration } = require('./html-builders');
+const {
+  computeSortedBlocks,
+  computeLineNumDecoClasses,
+  computeHighlightDecos,
+  BlockDecorations,
+  OverlayDecorations
+} = require('./decorations');
 const electron = require('electron');
 const clipboard = electron.clipboard;
 const {
@@ -115,12 +121,21 @@ class PulsarTextEditorComponent {
     this._rafHandle = null;
     this._mounted = false;
 
-    // Block decorations: Map<decoration, blockInfo>.
-    // blockInfo: { decoration, element, wrapperElement, row, position, order, height, ro, markerSub, destroySub }
-    this._blockDecorations = new Map();
+    // Block decorations.
+    this._blockDecorations = new BlockDecorations({
+      scheduleUpdate: () => this._scheduleUpdate(),
+      replayAutoscroll: () => this._replayLastAutoscroll()
+    });
 
-    // Overlay decorations: Map<decoration, { wrapperEl, resizeObserver, destroySub, markerSub }>.
-    this._overlays = new Map();
+    // Overlay decorations.
+    this._overlays = new OverlayDecorations({
+      scheduleUpdate: () => this._scheduleUpdate(),
+      getLineHeight: () => this._lineHeight,
+      getCharWidth: () => this._charWidth,
+      getScroller: () => this._scroller,
+      getPixelTopForRow: () => this._pixelTopForRow,
+      getElement: () => this.element
+    });
 
     // Gutter row cache (mirrors Solid gutterCache).
     this._gutterCache = new Map();
@@ -209,7 +224,7 @@ class PulsarTextEditorComponent {
 
     // Lines view manages topSpacer + lines + bottomSpacer inside linesWrapper.
     this._linesView = new LinesView(this._linesWrapper, {
-      onBlockDecorationResize: (info) => this._didResizeRenderedBlockDecoration(info)
+      onBlockDecorationResize: (info) => this._blockDecorations.invalidate(info ? info.decoration : null)
     });
 
     // Highlights layer (selections + highlight decorations). z-index:-1 so it
@@ -297,14 +312,14 @@ class PulsarTextEditorComponent {
     if (this.props.model.onDidUpdateDecorations) {
       this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
         this._scheduleUpdate();
-        this._syncOverlayDecorations();
-        this._syncBlockDecorations();
+        this._overlays.syncFromModel(this.props.model);
+        this._blockDecorations.syncFromModel(this.props.model);
       });
     }
 
     // Initial decoration sync.
-    this._syncBlockDecorations();
-    this._syncOverlayDecorations();
+    this._blockDecorations.syncFromModel(this.props.model);
+    this._overlays.syncFromModel(this.props.model);
 
     // Destroy subscription.
     if (this.props.model.onDidDestroy) {
@@ -364,9 +379,7 @@ class PulsarTextEditorComponent {
     this._gutterInnerEl.style.transform = 'translateY(' + (-st) + 'px)';
 
     // Reposition floating overlays.
-    for (const decoration of this._overlays.keys()) {
-      this._positionOverlay(decoration);
-    }
+    this._overlays.repositionAll();
 
     this._scheduleUpdate();
   }
@@ -401,7 +414,7 @@ class PulsarTextEditorComponent {
     const displayLayer = model.displayLayer;
 
     // Sorted block decorations (needed by viewport math + views).
-    const sortedBlocks = this._computeSortedBlocks();
+    const sortedBlocks = computeSortedBlocks(this._blockDecorations.map);
 
     // Expose imperative helpers used by autoscroll, mouse handling, overlays.
     const topForRow = (row) => pixelTopForRow(row, lineHeight, sortedBlocks);
@@ -435,7 +448,7 @@ class PulsarTextEditorComponent {
     const maxDigits = Math.max(2, String(model.getLineCount()).length);
 
     // Decoration maps.
-    const lineNumDecoClasses = this._computeLineNumDecoClasses(model);
+    const lineNumDecoClasses = computeLineNumDecoClasses(model);
 
     // Visible gutter rows (with cache).
     const visibleGutterRows = this._computeVisibleGutterRows(firstRow, lastRow, model, totalRows);
@@ -456,7 +469,7 @@ class PulsarTextEditorComponent {
       : new Set();
 
     // Highlight decorations (find-results, bracket-matcher, linter, etc.).
-    const highlightDecos = this._computeHighlightDecos(model, firstRow, lastRow);
+    const highlightDecos = computeHighlightDecos(model, firstRow, lastRow);
 
     // Placeholder text (mini editors).
     const placeholderText = this._computePlaceholderText(model);
@@ -469,7 +482,7 @@ class PulsarTextEditorComponent {
       cursorRows, placeholderText, longestLineWidth,
     });
 
-    if (this._syncRenderedBlockDecorationHeights()) {
+    if (this._blockDecorations.syncRenderedHeights()) {
       blocksTotal = 0;
       for (const b of sortedBlocks) blocksTotal += b.height;
       totalHeight = totalRows * (lineHeight || 0) + blocksTotal;
@@ -510,17 +523,6 @@ class PulsarTextEditorComponent {
 
   // --- Computed values ------------------------------------------------------
 
-  _computeSortedBlocks() {
-    const list = [];
-    this._blockDecorations.forEach((info) => list.push(info));
-    list.sort((a, b) => {
-      if (a.row !== b.row) return a.row - b.row;
-      if (a.position !== b.position) return a.position === 'before' ? -1 : 1;
-      return (a.order || 0) - (b.order || 0);
-    });
-    return list;
-  }
-
   _computeLongestLineWidth(model, charWidth) {
     if (!charWidth) return 0;
     const longestRow = model.getApproximateLongestScreenRow
@@ -530,31 +532,6 @@ class PulsarTextEditorComponent {
       ? model.lineLengthForScreenRow(longestRow)
       : 0;
     return (length + 1) * charWidth;
-  }
-
-  _computeLineNumDecoClasses(model) {
-    const byRow = new Map();
-    if (!model || !model.decorationManager) return byRow;
-    const total = model.getScreenLineCount();
-    let propsByMarker = null;
-    if (model.decorationManager.decorationPropertiesByMarkerForScreenRowRange) {
-      propsByMarker = model.decorationManager.decorationPropertiesByMarkerForScreenRowRange(0, total);
-    }
-    if (!propsByMarker) return byRow;
-    for (const [marker, decos] of propsByMarker) {
-      for (const d of decos) {
-        if (!d || !d.class) continue;
-        const isLN = Array.isArray(d.type)
-          ? d.type.indexOf('line-number') !== -1
-          : d.type === 'line-number';
-        if (!isLN) continue;
-        const range = marker.getScreenRange ? marker.getScreenRange() : null;
-        if (!range) continue;
-        const reversed = marker.isReversed ? marker.isReversed() : false;
-        applyLineDecoration(byRow, d, range, reversed);
-      }
-    }
-    return byRow;
   }
 
   _computeVisibleGutterRows(firstRow, lastRow, model, totalRows) {
@@ -652,33 +629,6 @@ class PulsarTextEditorComponent {
       s.add(displayRow);
     }
     return s;
-  }
-
-  _computeHighlightDecos(model, firstRow, lastRow) {
-    if (!model || !model.decorationManager) return [];
-    const dm = model.decorationManager;
-    if (!dm.decorationPropertiesByMarkerForScreenRowRange) return [];
-    const propsByMarker = dm.decorationPropertiesByMarkerForScreenRowRange(firstRow, lastRow + 1);
-    const out = [];
-    for (const [marker, decos] of propsByMarker) {
-      const range = marker.getScreenRange ? marker.getScreenRange() : null;
-      if (!range || range.isEmpty()) continue;
-      for (let i = 0; i < decos.length; i++) {
-        const d = decos[i];
-        if (!d) continue;
-        const isHighlight = Array.isArray(d.type)
-          ? d.type.indexOf('highlight') !== -1
-          : d.type === 'highlight';
-        if (!isHighlight) continue;
-        if (d.class === 'selection') continue;
-        out.push({
-          key: marker.id + ':' + (d.class || '') + ':' + i,
-          class: d.class || '',
-          range
-        });
-      }
-    }
-    return out;
   }
 
   _computePlaceholderText(model) {
@@ -993,8 +943,8 @@ class PulsarTextEditorComponent {
       this._selectionClipboardImmediateId = null;
     }
     this._pendingSelectionClipboardText = null;
-    this._destroyAllBlockDecorations();
-    this._destroyAllOverlays();
+    this._blockDecorations.destroyAll();
+    this._overlays.destroyAll();
   }
 
   didShow() {
@@ -1167,7 +1117,7 @@ class PulsarTextEditorComponent {
       return;
     }
 
-    const sortedBlocks = this._computeSortedBlocks();
+    const sortedBlocks = computeSortedBlocks(this._blockDecorations.map);
     const startPx = this._pixelTopForRow
       ? this._pixelTopForRow(screenRange.start.row)
       : screenRange.start.row * lh;
@@ -1255,77 +1205,11 @@ class PulsarTextEditorComponent {
   // --- Block decorations ----------------------------------------------------
 
   addBlockDecoration(decoration) {
-    this._addBlockDecoration(decoration);
+    this._blockDecorations.add(decoration);
   }
 
   invalidateBlockDecorationDimensions(decoration) {
-    const info = this._blockDecorations.get(decoration);
-    if (!info) return;
-    if (this._updateBlockDecorationHeight(info)) {
-      this._scheduleUpdate();
-      this._replayLastAutoscroll();
-    }
-  }
-
-  _didResizeRenderedBlockDecoration(info) {
-    if (!info || !this._blockDecorations.has(info.decoration)) return;
-    if (this._updateBlockDecorationHeight(info)) {
-      this._scheduleUpdate();
-      this._replayLastAutoscroll();
-    }
-  }
-
-  _syncRenderedBlockDecorationHeights() {
-    let changed = false;
-    for (const info of this._blockDecorations.values()) {
-      const wrapper = info.wrapperElement;
-      if (!wrapper || !this._isNodeConnected(wrapper)) continue;
-      if (this._updateBlockDecorationHeight(info)) changed = true;
-    }
-    if (changed) {
-      this._scheduleUpdate();
-      this._replayLastAutoscroll();
-    }
-    return changed;
-  }
-
-  _updateBlockDecorationHeight(info) {
-    const newHeight = this._measureBlockDecorationHeight(info);
-    if (Math.abs((info.height || 0) - newHeight) <= 0.5) return false;
-    info.height = newHeight;
-    return true;
-  }
-
-  _measureBlockDecorationHeight(info) {
-    const wrapper = info.wrapperElement;
-    const target = wrapper && this._isNodeConnected(wrapper)
-      ? wrapper
-      : info.element;
-    if (!target) return 0;
-
-    if (target.parentNode && this._isNodeConnected(target)) {
-      const before = document.createElement('div');
-      const after = document.createElement('div');
-      const sentinelStyle =
-        'display: block; height: 1px; margin: 0; padding: 0; border: 0; overflow: hidden;';
-      before.style.cssText = sentinelStyle;
-      after.style.cssText = sentinelStyle;
-      target.parentNode.insertBefore(before, target);
-      target.parentNode.insertBefore(after, target.nextSibling);
-      const height = after.getBoundingClientRect().top -
-        before.getBoundingClientRect().bottom;
-      before.remove();
-      after.remove();
-      return Math.max(0, height);
-    }
-
-    return target.offsetHeight || 0;
-  }
-
-  _isNodeConnected(node) {
-    if (!node) return false;
-    if (node.isConnected != null) return node.isConnected;
-    return document.documentElement.contains(node);
+    this._blockDecorations.invalidate(decoration);
   }
 
   _replayLastAutoscroll() {
@@ -1333,219 +1217,6 @@ class PulsarTextEditorComponent {
     const { screenRange, options } = this._lastAutoscroll;
     this._autoscrollVertically(screenRange, options);
     this._autoscrollHorizontally(screenRange, options);
-  }
-
-  _addBlockDecoration(decoration) {
-    if (this._blockDecorations.has(decoration)) return;
-    const props = decoration.getProperties
-      ? decoration.getProperties()
-      : decoration.properties;
-    if (!props || !props.item) return;
-    const element = props.item.element || props.item;
-    if (!element || typeof element !== 'object' || element.nodeType !== 1) return;
-    const marker = decoration.getMarker
-      ? decoration.getMarker()
-      : decoration.marker;
-    if (!marker || marker.isDestroyed()) return;
-
-    const headPos = marker.getHeadScreenPosition();
-    const row = headPos ? headPos.row : 0;
-    const position = props.position === 'after' ? 'after' : 'before';
-    const order = typeof props.order === 'number' ? props.order : 0;
-
-    const ro = new ResizeObserver(() => {
-      const info = this._blockDecorations.get(decoration);
-      if (!info) return;
-      if (this._updateBlockDecorationHeight(info)) {
-        this._scheduleUpdate();
-        this._replayLastAutoscroll();
-      }
-    });
-    ro.observe(element);
-
-    let markerSub = null;
-    if (marker.onDidChange) {
-      markerSub = marker.onDidChange(() => {
-        const info = this._blockDecorations.get(decoration);
-        if (!info) return;
-        const newRow = marker.getHeadScreenPosition().row;
-        if (info.row !== newRow) {
-          info.row = newRow;
-          this._scheduleUpdate();
-        }
-      });
-    }
-
-    let destroySub = null;
-    if (decoration.onDidDestroy) {
-      destroySub = decoration.onDidDestroy(() => {
-        this._removeBlockDecoration(decoration);
-      });
-    }
-
-    const info = {
-      decoration, element, row, position, order,
-      height: 0,
-      ro, markerSub, destroySub,
-      wrapperElement: null
-    };
-    info.height = this._measureBlockDecorationHeight(info);
-    this._blockDecorations.set(decoration, info);
-    this._scheduleUpdate();
-  }
-
-  _removeBlockDecoration(decoration) {
-    const info = this._blockDecorations.get(decoration);
-    if (!info) return;
-    info.ro.disconnect();
-    if (info.markerSub) info.markerSub.dispose();
-    if (info.destroySub) info.destroySub.dispose();
-    info.wrapperElement = null;
-    this._blockDecorations.delete(decoration);
-    this._scheduleUpdate();
-  }
-
-  _destroyAllBlockDecorations() {
-    for (const decoration of [...this._blockDecorations.keys()]) {
-      this._removeBlockDecoration(decoration);
-    }
-  }
-
-  _syncBlockDecorations() {
-    const model = this.props.model;
-    if (!model || !model.decorationManager) return;
-    const all = model.decorationManager.getDecorations
-      ? model.decorationManager.getDecorations()
-      : [];
-    for (const decoration of all) {
-      if (!decoration.isType || !decoration.isType('block')) continue;
-      this._addBlockDecoration(decoration);
-    }
-  }
-
-  // --- Overlay decorations --------------------------------------------------
-
-  _syncOverlayDecorations() {
-    const model = this.props.model;
-    if (!model || !model.decorationManager) return;
-    const liveDecorations = new Set();
-    const allDecorations = model.decorationManager.getDecorations
-      ? model.decorationManager.getDecorations()
-      : [];
-    for (const decoration of allDecorations) {
-      if (!decoration.isType('overlay')) continue;
-      liveDecorations.add(decoration);
-      if (!this._overlays.has(decoration)) {
-        this._addOverlay(decoration);
-      } else {
-        this._positionOverlay(decoration);
-      }
-    }
-    for (const [decoration, entry] of this._overlays) {
-      if (!liveDecorations.has(decoration)) {
-        this._removeOverlay(decoration, entry);
-      }
-    }
-  }
-
-  _addOverlay(decoration) {
-    const props = decoration.getProperties ? decoration.getProperties() : decoration.properties;
-    if (!props) return;
-    const item = props.item;
-    if (!item) return;
-    const itemEl = item.element || item;
-    if (!itemEl || typeof itemEl !== 'object' || !itemEl.appendChild) return;
-
-    const wrapperEl = document.createElement('atom-overlay');
-    if (props.class) wrapperEl.classList.add(props.class);
-    wrapperEl.style.cssText = 'position: fixed; z-index: 4;';
-    wrapperEl.appendChild(itemEl);
-    this.element.appendChild(wrapperEl);
-
-    const resizeObserver = new ResizeObserver(() => { this._positionOverlay(decoration); });
-    resizeObserver.observe(itemEl);
-
-    let destroySub = null;
-    if (decoration.onDidDestroy) {
-      destroySub = decoration.onDidDestroy(() => {
-        const entry = this._overlays.get(decoration);
-        if (entry) this._removeOverlay(decoration, entry);
-      });
-    }
-
-    let markerSub = null;
-    const marker = decoration.getMarker();
-    if (marker && marker.onDidChange) {
-      markerSub = marker.onDidChange(() => this._positionOverlay(decoration));
-    }
-
-    this._overlays.set(decoration, { wrapperEl, resizeObserver, destroySub, markerSub });
-    this._positionOverlay(decoration);
-  }
-
-  _positionOverlay(decoration) {
-    const entry = this._overlays.get(decoration);
-    if (!entry) return;
-    const { wrapperEl } = entry;
-    const props = decoration.getProperties ? decoration.getProperties() : decoration.properties;
-    if (!props) return;
-    const marker = decoration.getMarker ? decoration.getMarker() : null;
-    if (!marker) return;
-
-    const screenPosition = props.position === 'tail'
-      ? marker.getTailScreenPosition()
-      : marker.getHeadScreenPosition();
-
-    const lh = this._lineHeight;
-    const cw = this._charWidth;
-    if (!lh || !cw || !this._scroller) return;
-
-    const scrollerOffsetTop = this._scroller.offsetTop;
-    const scrollerOffsetLeft = this._scroller.offsetLeft;
-    const pixelTop = (this._pixelTopForRow
-      ? this._pixelTopForRow(screenPosition.row)
-      : screenPosition.row * lh) - this._scroller.scrollTop;
-    const pixelLeft = screenPosition.column * cw - this._scroller.scrollLeft;
-
-    let top = scrollerOffsetTop + pixelTop + lh;
-    let left = scrollerOffsetLeft + pixelLeft;
-
-    const itemEl = wrapperEl.firstChild;
-    if (itemEl) {
-      const itemRect = itemEl.getBoundingClientRect();
-      const editorRect = this.element.getBoundingClientRect();
-      const windowH = window.innerHeight;
-      const windowW = window.innerWidth;
-      const absTop = editorRect.top + top;
-      if (absTop + itemRect.height > windowH) {
-        const flippedTop = scrollerOffsetTop + pixelTop - itemRect.height;
-        if (editorRect.top + flippedTop >= 0) top = flippedTop;
-      }
-      const absLeft = editorRect.left + left;
-      if (absLeft + itemRect.width > windowW) {
-        left = Math.max(-editorRect.left, windowW - editorRect.left - itemRect.width);
-      }
-      if (absLeft < 0) left = -editorRect.left;
-    }
-
-    wrapperEl.style.top = Math.round(top) + 'px';
-    wrapperEl.style.left = Math.round(left) + 'px';
-  }
-
-  _removeOverlay(decoration, entry) {
-    if (!entry) return;
-    const { wrapperEl, resizeObserver, destroySub, markerSub } = entry;
-    resizeObserver.disconnect();
-    if (destroySub) destroySub.dispose();
-    if (markerSub) markerSub.dispose();
-    if (wrapperEl.parentNode) wrapperEl.parentNode.removeChild(wrapperEl);
-    this._overlays.delete(decoration);
-  }
-
-  _destroyAllOverlays() {
-    for (const [decoration, entry] of this._overlays) {
-      this._removeOverlay(decoration, entry);
-    }
   }
 
   // --- Position / measurement queries ---------------------------------------
@@ -1693,7 +1364,7 @@ class PulsarTextEditorComponent {
     }
 
     return this.setScrollTop(
-      pixelTopForRow(row, this._lineHeight, this._computeSortedBlocks()),
+      pixelTopForRow(row, this._lineHeight, computeSortedBlocks(this._blockDecorations.map)),
       scheduleUpdate
     );
   }
