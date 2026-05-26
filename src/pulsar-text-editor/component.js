@@ -1029,6 +1029,8 @@ class PulsarTextEditorComponent {
       this.element.classList.add('is-focused');
       this._restartBlink();
     }
+
+    this._scheduleUpdate();
   }
 
   didBlur(event) {
