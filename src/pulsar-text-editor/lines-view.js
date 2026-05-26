@@ -1,7 +1,51 @@
 'use strict';
 
-const { buildLineHtml, buildPlainLineHtml } = require('./html-builders');
+const { walkScreenLineTags } = require('../screen-line-tag-walker');
 const { LONG_LINE_THRESHOLD, PLAIN_TEXT_THRESHOLD } = require('./viewport');
+
+const NBSP = ' ';
+
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildLineHtml(screenLine, displayLayer, visibleColumnRange) {
+  if (!screenLine) return NBSP;
+  if (!screenLine.tags || screenLine.tags.length === 0) {
+    const text = screenLine.lineText || '';
+    return text.length > 0 ? escapeHtml(text) : NBSP;
+  }
+  let html = '';
+  let hasText = false;
+  walkScreenLineTags({
+    tags: screenLine.tags,
+    lineText: screenLine.lineText || '',
+    displayLayer,
+    visibleColumnRange,
+    onOpenScope: (cls) => { html += '<span class="' + escapeHtml(cls) + '">'; },
+    onCloseScope: () => { html += '</span>'; },
+    onTextRun: (text) => {
+      if (text.length > 0) hasText = true;
+      html += escapeHtml(text);
+    }
+  });
+  if (!hasText) html += NBSP;
+  return html;
+}
+
+function buildPlainLineHtml(text, visibleColumnRange) {
+  if (!text || text.length === 0) return NBSP;
+  if (visibleColumnRange) {
+    const [from, to] = visibleColumnRange;
+    const clipped = text.substring(Math.max(0, from), Math.min(text.length, to));
+    return clipped.length > 0 ? escapeHtml(clipped) : NBSP;
+  }
+  return escapeHtml(text);
+}
 
 const LINE_CACHE_SLACK = 200;
 

@@ -1,6 +1,29 @@
 'use strict';
 
-const { rangeToRects } = require('./html-builders');
+function rangeToRects(range, lh, cw, topForRow) {
+  if (!range || range.isEmpty()) return [];
+  const { start, end } = range;
+  if (start.row === end.row) {
+    const w = (end.column - start.column) * cw;
+    if (w <= 0) return [];
+    return [{
+      top: topForRow(start.row),
+      left: start.column * cw,
+      width: w,
+      right: null,
+      height: lh
+    }];
+  }
+  const rects = [];
+  rects.push({ top: topForRow(start.row), left: start.column * cw, right: 0, width: null, height: lh });
+  for (let r = start.row + 1; r < end.row; r++) {
+    rects.push({ top: topForRow(r), left: 0, right: 0, width: null, height: lh });
+  }
+  if (end.column > 0) {
+    rects.push({ top: topForRow(end.row), left: 0, width: end.column * cw, right: null, height: lh });
+  }
+  return rects;
+}
 
 // Manages the `.highlights` and `.cursors` overlay layers inside linesWrapper.
 // Both are `position: absolute` and span the full content height so their

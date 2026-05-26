@@ -1,10 +1,33 @@
 'use strict';
 
-const { applyLineDecoration } = require('./html-builders');
-
 // ---------------------------------------------------------------------------
 // Pure computation helpers (stateless, called from component._render)
 // ---------------------------------------------------------------------------
+
+function applyLineDecoration(byRow, decoration, screenRange, reversed) {
+  if (!decoration.class) return;
+  const empty = screenRange.isEmpty();
+  if (empty) {
+    if (decoration.onlyNonEmpty) return;
+  } else {
+    if (decoration.onlyEmpty) return;
+  }
+  let omitLastRow = false;
+  if (!empty && decoration.omitEmptyLastRow !== false) {
+    omitLastRow = screenRange.end.column === 0;
+  }
+  let startRow = screenRange.start.row;
+  let endRow = screenRange.end.row;
+  if (decoration.onlyHead) {
+    if (reversed) endRow = startRow;
+    else startRow = endRow;
+  }
+  for (let row = startRow; row <= endRow; row++) {
+    if (omitLastRow && row === screenRange.end.row) break;
+    const cur = byRow.get(row);
+    byRow.set(row, cur ? cur + ' ' + decoration.class : decoration.class);
+  }
+}
 
 function computeSortedBlocks(blockDecorations) {
   const list = [];
