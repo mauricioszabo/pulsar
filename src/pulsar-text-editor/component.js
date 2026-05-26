@@ -295,44 +295,33 @@ class PulsarTextEditorComponent {
     // TextMate tokenizes asynchronously. Display-layer highlighting changes
     // invalidate affected screen-line objects; this final event only needs a
     // scheduled frame for any pending observers.
-    if (this.props.model.onDidTokenize) {
-      this._tokenizeSub = this.props.model.onDidTokenize(() => {
-        this._scheduleUpdate();
-      });
-    }
+    this._tokenizeSub = this.props.model.onDidTokenize(() => {
+      this._scheduleUpdate();
+    });
 
     // Placeholder text subscription.
-    if (this.props.model.onDidChangePlaceholderText) {
-      this._placeholderSub = this.props.model.onDidChangePlaceholderText(() => {
-        this._scheduleUpdate();
-      });
-    }
+    this._placeholderSub = this.props.model.onDidChangePlaceholderText(() => {
+      this._scheduleUpdate();
+    });
 
     // Decoration updates.
-    if (this.props.model.onDidUpdateDecorations) {
-      this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
-        this._scheduleUpdate();
-        this._overlays.syncFromModel(this.props.model);
-        this._blockDecorations.syncFromModel(this.props.model);
-      });
-    }
+    this._decorationsSub = this.props.model.onDidUpdateDecorations(() => {
+      this._scheduleUpdate();
+      this._overlays.syncFromModel(this.props.model);
+      this._blockDecorations.syncFromModel(this.props.model);
+    });
 
     // Initial decoration sync.
     this._blockDecorations.syncFromModel(this.props.model);
     this._overlays.syncFromModel(this.props.model);
 
-    // Destroy subscription.
-    if (this.props.model.onDidDestroy) {
-      this._destroySub = this.props.model.onDidDestroy(() => this.destroy());
-    }
+    this._destroySub = this.props.model.onDidDestroy(() => this.destroy());
 
     // Grammar dataset.
     this._updateGrammarDataset();
-    if (this.props.model.onDidChangeGrammar) {
-      this._grammarSub = this.props.model.onDidChangeGrammar(() => {
-        this._updateGrammarDataset();
-      });
-    }
+    this._grammarSub = this.props.model.onDidChangeGrammar(() => {
+      this._updateGrammarDataset();
+    });
 
     // Mini attribute.
     if (this.props.model.isMini()) {
@@ -525,12 +514,8 @@ class PulsarTextEditorComponent {
 
   _computeLongestLineWidth(model, charWidth) {
     if (!charWidth) return 0;
-    const longestRow = model.getApproximateLongestScreenRow
-      ? model.getApproximateLongestScreenRow()
-      : 0;
-    const length = model.lineLengthForScreenRow
-      ? model.lineLengthForScreenRow(longestRow)
-      : 0;
+    const longestRow = model.getApproximateLongestScreenRow();
+    const length = model.lineLengthForScreenRow(longestRow);
     return (length + 1) * charWidth;
   }
 
@@ -805,7 +790,7 @@ class PulsarTextEditorComponent {
 
   updateModelSoftWrapColumn() {
     const model = this.props.model;
-    if (!model || !this._charWidth) return false;
+    if (!this._charWidth) return false;
     if (model.width != null) return false;
 
     const editorWidthInChars = this.getScrollContainerClientWidthInBaseCharacters();
@@ -1339,8 +1324,8 @@ class PulsarTextEditorComponent {
   getScrollWidth() {
     const model = this.props.model;
     const clientWidth = this.getScrollContainerClientWidth();
-    if (model.isSoftWrapped && model.isSoftWrapped()) return clientWidth;
-    if (model.getAutoWidth && model.getAutoWidth()) return this.getContentWidth();
+    if (model.isSoftWrapped()) return clientWidth;
+    if (model.getAutoWidth()) return this.getContentWidth();
     return Math.max(this.getContentWidth(), clientWidth);
   }
 
@@ -1406,9 +1391,7 @@ class PulsarTextEditorComponent {
   setInputEnabled(enabled) {
     this.inputEnabled = enabled !== false;
     if (this.hiddenInput) this.hiddenInput.value = '';
-    if (this.props.model.update) {
-      this.props.model.update({ keyboardInputEnabled: this.inputEnabled });
-    }
+    this.props.model.update({ keyboardInputEnabled: this.inputEnabled });
   }
   getHiddenInput() { return this.hiddenInput; }
 
@@ -1424,7 +1407,7 @@ class PulsarTextEditorComponent {
   // --- Decoration / gutter queries ------------------------------------------
 
   queryGuttersToRender() {
-    return this.props.model ? [this.props.model.getLineNumberGutter()] : [];
+    return [this.props.model.getLineNumberGutter()];
   }
 
   queryDecorationsToRender() {}
