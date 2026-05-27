@@ -287,7 +287,20 @@ class TextEditorElement extends HTMLElement {
 
   getComponent() {
     if (!this.component) {
-      this.component = new TextEditorComponent({
+      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
+      // the experimental SolidJS-based implementation under
+      // `src/pulsar-text-editor/`. Default is the legacy Etch component.
+      // Note: this is read once per element, so toggling the flag at
+      // runtime only affects newly-created editors; existing ones keep
+      // whichever implementation they were constructed with.
+      const useNew =
+        global.atom &&
+        global.atom.config &&
+        global.atom.config.get('core.useNewTextEditor') === true;
+      const ComponentClass = useNew
+        ? require('./pulsar-text-editor')
+        : TextEditorComponent;
+      this.component = new ComponentClass({
         element: this,
         mini: this.hasAttribute('mini'),
         updatedSynchronously: this.updatedSynchronously,
