@@ -320,7 +320,7 @@
     "spellchecker": "https://github.com/pulsar-edit/node-spellchecker.git#electron-40",
     "es5-ext": "https://github.com/pulsar-edit/es5-ext#169f6ae9b2675675269a0ba265f83c29c7b56244",
     "@electron/remote": "2.1.2",
-    "@pulsar-edit/superstring": "3.0.5",
+    "@pulsar-edit/superstring": "https://github.com/pulsar-edit/superstring#527d995",
     "@pulsar-edit/pathwatcher": "9.0.3",
     "**/underscore-plus": "npm:@pulsar-edit/underscore-plus@1.8.3"
   }
