@@ -141,8 +141,8 @@ describe('StateStore', () => {
       });
       store.initialize({ configDirPath: atom.getConfigDirPath() });
       const instance = await store.dbPromise;
-      const Database = require("better-sqlite3");
-      expect(instance instanceof Database).toBe(true);
+      const { DatabaseSync } = require('node:sqlite');
+      expect(instance instanceof DatabaseSync).toBe(true);
     });
   });
 });

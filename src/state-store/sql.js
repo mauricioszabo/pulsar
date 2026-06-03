@@ -1,13 +1,7 @@
 'use strict';
 
 const path = require('path');
-const nativeSQLite = require(path.join(
-  require.resolve('better-sqlite3'),
-  '..', '..',
-  'build', 'Release',
-  'better_sqlite3.node'
-));
-const sqlite3 = require('better-sqlite3');
+const { DatabaseSync } = require('node:sqlite');
 
 module.exports = class SQLStateStore {
   constructor(databaseName, version, { storagePath }) {
@@ -17,7 +11,7 @@ module.exports = class SQLStateStore {
     let dbPath = path.join(storagePath, 'session-store.db');
     let db;
     try {
-      db = sqlite3(dbPath, { nativeBinding: nativeSQLite });
+      db = new DatabaseSync(dbPath);
     } catch (error) {
       let stack = new Error('Error loading SQLite database for state storage').stack;
       atom.notifications.addFatalError(
@@ -28,7 +22,7 @@ module.exports = class SQLStateStore {
       return null;
     }
 
-    db.pragma('journal_mode = WAL');
+    db.exec('PRAGMA journal_mode = WAL');
     db.exec(
       `CREATE TABLE IF NOT EXISTS ${this.tableName} (key VARCHAR, value JSON)`
     );
@@ -40,10 +34,10 @@ module.exports = class SQLStateStore {
     this.connected = true;
   }
 
-  // `better-sqlite3` offers a synchronous API and is militant about why it’s
-  // actually better for performance. But the contract for this adapter expects
-  // us to return promises here, so we mark all these functions as `async` so
-  // that they'll implicitly wrap return values in `Promise.resolve`.
+  // Node's built-in SQLite API is synchronous. But the contract for this
+  // adapter expects us to return promises here, so we mark all these functions
+  // as `async` so that they'll implicitly wrap return values in
+  // `Promise.resolve`.
   get dbPromise() {
     return Promise.resolve(this.db);
   }
@@ -98,12 +92,12 @@ module.exports = class SQLStateStore {
 
 function getOne(db, sql, ...params) {
   const stmt = db.prepare(sql);
-  return stmt.get(params);
+  return stmt.get(...params);
 }
 
 function exec(db, sql, ...params) {
   const stmt = db.prepare(sql);
-  return stmt.run(params);
+  return stmt.run(...params);
 }
 
 function reviver(_, value) {
