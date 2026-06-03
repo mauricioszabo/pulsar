@@ -1,4 +1,4 @@
-const { app, crashReporter } = require('electron');
+const { app, crashReporter, protocol } = require('electron');
 const path = require('path');
 const temp = require('temp');
 const parseCommandLine = require('./parse-command-line');
@@ -10,6 +10,18 @@ const Config = require('../config');
 const StartupTime = require('../startup-time');
 
 StartupTime.setStartTime();
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'atom',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+]);
 
 module.exports = function start(resourcePath, devResourcePath, startTime) {
   global.shellStartTime = startTime;
