@@ -65,6 +65,54 @@ function computeLineNumDecoClasses(model) {
   return byRow;
 }
 
+let rangeForOverlayMeasurement = null;
+
+function textNodesForElement(element) {
+  const nodes = [];
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) nodes.push(node);
+  return nodes;
+}
+
+function textNodeAndOffsetForColumn(textNodes, column) {
+  if (textNodes.length === 0) return [null, 0];
+  if (column <= 0) return [textNodes[0], 0];
+
+  let previous = 0;
+  for (const node of textNodes) {
+    const next = previous + node.length;
+    if (column <= next) return [node, column - previous];
+    previous = next;
+  }
+
+  const last = textNodes[textNodes.length - 1];
+  return [last, last.length];
+}
+
+function measuredOverlayLeftForScreenPosition(editorElement, row, column, charWidth) {
+  if (!editorElement || !editorElement.querySelector) return null;
+  const lineEl = editorElement.querySelector(`.line[data-screen-row="${row}"]`);
+  if (!lineEl || !lineEl.isConnected) return null;
+
+  const computedStyle = window.getComputedStyle(lineEl);
+  const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
+  const renderedColumnStart = charWidth ? Math.round(paddingLeft / charWidth) : 0;
+  const renderedColumn = column - renderedColumnStart;
+  if (renderedColumn < 0) return null;
+
+  const textNodes = textNodesForElement(lineEl);
+  const [textNode, offset] = textNodeAndOffsetForColumn(textNodes, renderedColumn);
+  if (!textNode) return null;
+
+  rangeForOverlayMeasurement ??= document.createRange();
+  rangeForOverlayMeasurement.setStart(textNode, offset);
+  rangeForOverlayMeasurement.setEnd(textNode, offset);
+
+  const rect = rangeForOverlayMeasurement.getBoundingClientRect();
+  return rect && Number.isFinite(rect.left) ? rect.left : null;
+}
+
 function computeHighlightDecos(model, firstRow, lastRow) {
   if (!model || !model.decorationManager) return [];
   const dm = model.decorationManager;
@@ -358,10 +406,19 @@ class OverlayDecorations {
     const pixelTop = (pixelTopForRow
       ? pixelTopForRow(screenPosition.row)
       : screenPosition.row * lh) - scroller.scrollTop;
-    const pixelLeft = screenPosition.column * cw - scroller.scrollLeft;
+    const fallbackPixelLeft = screenPosition.column * cw - scroller.scrollLeft;
+    const measuredLeft = measuredOverlayLeftForScreenPosition(
+      this._cb.getElement(),
+      screenPosition.row,
+      screenPosition.column,
+      cw
+    );
+    const leftIsViewportRelative = measuredLeft != null;
 
     let top = scrollerOffsetTop + pixelTop + lh;
-    let left = scrollerOffsetLeft + pixelLeft;
+    let left = leftIsViewportRelative
+      ? measuredLeft
+      : scrollerOffsetLeft + fallbackPixelLeft;
 
     const itemEl = wrapperEl.firstChild;
     if (itemEl) {
@@ -374,11 +431,20 @@ class OverlayDecorations {
         const flippedTop = scrollerOffsetTop + pixelTop - itemRect.height;
         if (editorRect.top + flippedTop >= 0) top = flippedTop;
       }
-      const absLeft = editorRect.left + left;
-      if (absLeft + itemRect.width > windowW) {
-        left = Math.max(-editorRect.left, windowW - editorRect.left - itemRect.width);
+
+      if (props.avoidOverflow !== false) {
+        const computedStyle = window.getComputedStyle(itemEl);
+        const marginLeft = parseInt(computedStyle.marginLeft, 10) || 0;
+        const itemLeft = leftIsViewportRelative
+          ? left + marginLeft
+          : editorRect.left + left + marginLeft;
+        const itemRight = itemLeft + itemRect.width;
+        if (itemLeft < 0) {
+          left -= itemLeft;
+        } else if (itemRight > windowW) {
+          left -= itemRight - windowW;
+        }
       }
-      if (absLeft < 0) left = -editorRect.left;
     }
 
     wrapperEl.style.top = Math.round(top) + 'px';
