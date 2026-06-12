@@ -208,11 +208,22 @@ class PulsarTextEditorComponent {
     this._bodyEl.appendChild(this._gutterView.getOuterEl());
     this._gutterInnerEl = this._gutterView.getInnerEl();
 
-    // Scroll-view: native overflow:auto for both scrollbars.
+    // Scroll-view: this is the stable viewport layer exposed to editor
+    // packages. The historical editor's `.scroll-view` did not itself scroll;
+    // its content was translated underneath it. Keep that contract so packages
+    // like wrap-guide can append absolute-positioned overlays here and have
+    // them remain visible while the editor scrolls.
+    this._scrollViewEl = document.createElement('div');
+    this._scrollViewEl.className = 'scroll-view';
+    this._scrollViewEl.style.cssText = 'flex: 1; overflow: hidden; position: relative;';
+    this._bodyEl.appendChild(this._scrollViewEl);
+
+    // Native scroll container for the rewritten editor internals. This stays
+    // private; external packages should continue targeting `.scroll-view`.
     this._scroller = document.createElement('div');
-    this._scroller.className = 'scroll-view';
-    this._scroller.style.cssText = 'flex: 1; overflow: auto; position: relative;';
-    this._bodyEl.appendChild(this._scroller);
+    this._scroller.className = 'native-scroll-container';
+    this._scroller.style.cssText = 'width: 100%; height: 100%; overflow: auto; position: relative;';
+    this._scrollViewEl.appendChild(this._scroller);
 
     // Lines-wrapper: stacking context so `.region`'s z-index:-1 only escapes
     // as far as this element, landing behind the line text.
