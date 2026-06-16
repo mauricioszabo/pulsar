@@ -81,10 +81,10 @@ function buildBundledPackagesMetadata(packageJSON) {
         'static',
         mainPath
       );
-      // Convert backward slashes to forward slashes in order to allow package
-      // main modules to be required from the snapshot. This is because we use
-      // forward slashes to cache the sources in the snapshot, so we need to use
-      // them here as well.
+      // Normalize to forward slashes so the precomputed `main` path is
+      // platform-independent. This keeps the cached `_atomPackages` metadata
+      // consistent across OSes and lets package main modules be resolved from a
+      // V8 startup snapshot, whose `customRequire` keys on forward-slash paths.
       packageNewMetadata.main = packageNewMetadata.main.replace(/\\/g, '/');
     }
 

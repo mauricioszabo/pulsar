@@ -14,10 +14,25 @@ class NativeCompileCache {
   constructor() {
     this.cacheStore = null;
     this.previousModuleCompile = null;
+    // Observability for the V8 bytecode cache. `hits`/`misses` count whether a
+    // cached buffer existed for a module; `rejected` counts buffers that existed
+    // but were refused by V8 (e.g. a seed built against a different V8 version),
+    // which is the signal that a shipped code-cache seed is dead weight.
+    this.cacheStats = { hits: 0, misses: 0, rejected: 0 };
+    // Opt-in per-file logging for debugging which modules hit/miss/reject.
+    this.verbose = process.env.PULSAR_LOG_V8_CACHE === '1';
   }
 
   setCacheStore(store) {
     this.cacheStore = store;
+  }
+
+  getCacheStats() {
+    return this.cacheStats;
+  }
+
+  resetCacheStats() {
+    this.cacheStats = { hits: 0, misses: 0, rejected: 0 };
   }
 
   setV8Version(v8Version) {
@@ -91,9 +106,22 @@ class NativeCompileCache {
         );
         compiledWrapper = compilationResult.result;
         if (compilationResult.wasRejected) {
+          self.cacheStats.rejected++;
           self.cacheStore.delete(cacheKey);
+          if (self.verbose) {
+            console.log(`[v8-cache] reject ${filename}`);
+          }
+        } else {
+          self.cacheStats.hits++;
+          if (self.verbose) {
+            console.log(`[v8-cache] hit    ${filename}`);
+          }
         }
       } else {
+        self.cacheStats.misses++;
+        if (self.verbose) {
+          console.log(`[v8-cache] miss   ${filename}`);
+        }
         let compilationResult;
         try {
           compilationResult = self.runInThisContext(wrapper, filename);

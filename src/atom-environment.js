@@ -110,12 +110,17 @@ class AtomEnvironment {
     });
 
     /** @type {I18n} */
-    const localeLoadStartTime = performance.now();
+    // `performance` is absent while the V8 startup snapshot is being generated
+    // (the snapshot context has no DOM/timing globals). Fall back to a no-op
+    // clock there; real timings are recorded at runtime.
+    const perf =
+      typeof performance !== 'undefined' ? performance : { now: () => 0 };
+    const localeLoadStartTime = perf.now();
     this.i18n = new I18n({
       config: this.config
     });
     this.i18n.preload();
-    this.localeLoadTime = Math.round(performance.now() - localeLoadStartTime);
+    this.localeLoadTime = Math.round(perf.now() - localeLoadStartTime);
 
     /** @type {KeymapManager} */
     this.keymaps = new KeymapManager({

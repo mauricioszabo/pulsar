@@ -4,16 +4,24 @@ const fs = require('fs-plus');
 const path = require('path');
 
 module.exports = class FileSystemBlobStore {
-  static load(directory) {
-    let instance = new FileSystemBlobStore(directory);
+  static load(directory, fallbackDirectory) {
+    let instance = new FileSystemBlobStore(directory, fallbackDirectory);
     instance.load();
     return instance;
   }
 
-  constructor(directory) {
+  constructor(directory, fallbackDirectory) {
     this.blobFilename = path.join(directory, 'BLOB');
     this.blobMapFilename = path.join(directory, 'MAP');
     this.lockFilename = path.join(directory, 'LOCK');
+    // An optional read-only seed shipped inside the app. It is only consulted
+    // when the writable store has no data yet (a fresh install / post-update),
+    // so the first launch gets V8 bytecode cache hits instead of recompiling.
+    // Writes always go to the writable `directory`, never here.
+    if (fallbackDirectory) {
+      this.fallbackBlobFilename = path.join(fallbackDirectory, 'BLOB');
+      this.fallbackBlobMapFilename = path.join(fallbackDirectory, 'MAP');
+    }
     this.reset();
   }
 
@@ -25,16 +33,30 @@ module.exports = class FileSystemBlobStore {
   }
 
   load() {
-    if (!fs.existsSync(this.blobMapFilename)) {
+    let blobFilename = this.blobFilename;
+    let blobMapFilename = this.blobMapFilename;
+
+    // Fall back to the shipped seed only when the writable store is empty.
+    if (
+      (!fs.existsSync(blobMapFilename) || !fs.existsSync(blobFilename)) &&
+      this.fallbackBlobFilename &&
+      fs.existsSync(this.fallbackBlobMapFilename) &&
+      fs.existsSync(this.fallbackBlobFilename)
+    ) {
+      blobFilename = this.fallbackBlobFilename;
+      blobMapFilename = this.fallbackBlobMapFilename;
+    }
+
+    if (!fs.existsSync(blobMapFilename)) {
       return;
     }
-    if (!fs.existsSync(this.blobFilename)) {
+    if (!fs.existsSync(blobFilename)) {
       return;
     }
 
     try {
-      this.storedBlob = fs.readFileSync(this.blobFilename);
-      this.storedBlobMap = JSON.parse(fs.readFileSync(this.blobMapFilename));
+      this.storedBlob = fs.readFileSync(blobFilename);
+      this.storedBlobMap = JSON.parse(fs.readFileSync(blobMapFilename));
     } catch (e) {
       this.reset();
     }

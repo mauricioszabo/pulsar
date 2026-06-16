@@ -42,6 +42,11 @@ exports.removeTranspilerConfigForPath = function(packagePath) {
 
 const cacheStats = {};
 let cacheDirectory = null;
+// An optional read-only cache directory shipped inside the packaged app. It is
+// populated at build time (see script/generate-compile-cache.js) with the same
+// content-addressed paths the writable cache uses, so a freshly-installed app
+// gets cache hits on its first launch instead of transpiling everything cold.
+let fallbackCacheDirectory = null;
 
 exports.setAtomHomeDirectory = function(atomHome) {
   let cacheDir = path.join(atomHome, 'compile-cache');
@@ -61,6 +66,17 @@ exports.setCacheDirectory = function(directory) {
 
 exports.getCacheDirectory = function() {
   return cacheDirectory;
+};
+
+// Point the compile cache at a read-only directory of pre-transpiled sources
+// shipped with the app. Reads fall through to it when the writable cache misses;
+// writes never touch it.
+exports.setFallbackCacheDirectory = function(directory) {
+  fallbackCacheDirectory = directory;
+};
+
+exports.getFallbackCacheDirectory = function() {
+  return fallbackCacheDirectory;
 };
 
 exports.addPathToCache = function(filePath, atomHome) {
@@ -118,6 +134,17 @@ function readCachedJavaScript(relativeCachePath) {
       return fs.readFileSync(cachePath, 'utf8');
     } catch (error) {}
   }
+  // Fall through to the read-only cache shipped with the app, if any. The cache
+  // keys are content-addressed, so an entry here is valid for the exact same
+  // source the writable cache would have produced.
+  if (fallbackCacheDirectory) {
+    const fallbackPath = path.join(fallbackCacheDirectory, relativeCachePath);
+    if (fs.isFileSync(fallbackPath)) {
+      try {
+        return fs.readFileSync(fallbackPath, 'utf8');
+      } catch (error) {}
+    }
+  }
   return null;
 }
 
@@ -129,17 +156,26 @@ function writeCachedJavaScript(relativeCachePath, code) {
 const INLINE_SOURCE_MAP_REGEXP = /\/\/[#@]\s*sourceMappingURL=([^'"\n]+)\s*$/gm;
 
 exports.install = function(resourcesPath, nodeRequire) {
-  const snapshotSourceMapConsumer = {
-    originalPositionFor({ line, column }) {
-      const { relativePath, row } = snapshotResult.translateSnapshotRow(line);
-      return {
-        column,
-        line: row,
-        source: path.join(resourcesPath, 'app', 'static', relativePath),
-        name: null
-      };
-    }
-  };
+  // `snapshotResult` is only defined when the app is booted from a V8 startup
+  // snapshot. Without a snapshot (dev mode, or builds shipped without one), the
+  // global is absent, so the `<embedded>` source-map consumer must be skipped
+  // entirely rather than dereferencing an undefined global.
+  const snapshotSourceMapConsumer =
+    typeof snapshotResult !== 'undefined'
+      ? {
+          originalPositionFor({ line, column }) {
+            const { relativePath, row } = snapshotResult.translateSnapshotRow(
+              line
+            );
+            return {
+              column,
+              line: row,
+              source: path.join(resourcesPath, 'app', 'static', relativePath),
+              name: null
+            };
+          }
+        }
+      : null;
 
   sourceMapSupport.install({
     handleUncaughtExceptions: false,
@@ -149,7 +185,9 @@ exports.install = function(resourcesPath, nodeRequire) {
     // code from our cache directory.
     retrieveSourceMap: function(filePath) {
       if (filePath === '<embedded>') {
-        return { map: snapshotSourceMapConsumer };
+        return snapshotSourceMapConsumer
+          ? { map: snapshotSourceMapConsumer }
+          : null;
       }
 
       if (!cacheDirectory || !fs.isFileSync(filePath)) {

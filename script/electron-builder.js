@@ -6,6 +6,8 @@ const { existsSync } = require('fs');
 const yargs = require('yargs');
 const { hideBin } = require('yargs/helpers')
 const generateMetadata = require('./generate-metadata-for-builder')
+const generateCompileCache = require('./generate-compile-cache')
+const generateV8CacheSeed = require('./generate-v8-cache-seed')
 const macBundleDocumentTypes = require("./mac-bundle-document-types.js");
 
 // Ensure the user has initialized and built the `ppm` submodule before they
@@ -125,10 +127,15 @@ let options = {
   appId: `dev.pulsar-edit.${baseName}`,
   npmRebuild: false,
   publish: null,
+  // Replace the packaged Electron's V8 snapshot blobs with our custom ones that
+  // bake the editor core into the heap. Runs per-platform after files are copied.
+  afterPack: require('./after-pack-snapshot'),
   files: [
     // --- Inclusions ---
     // Core Repo Inclusions
     "package.json",
+    "compile-cache/**/*",
+    "blob-store-seed/**/*",
     "dot-atom/**/*",
     "exports/**/*",
     "resources/**/*",
@@ -447,6 +454,24 @@ async function main() {
   let parsedPackageJson = JSON.parse(pack);
   let rewrotePackageJson = false;
   options.extraMetadata = generateMetadata(parsedPackageJson);
+
+  // Pre-transpile bundled sources into a read-only cache shipped with the app so
+  // the first launch after install/update isn't a cold compile. The output lands
+  // in `compile-cache/` at the repo root, which is included via the `files` glob.
+  generateCompileCache();
+
+  // Warm a V8 bytecode-cache seed with the exact Electron/V8 that will ship, so
+  // the first launch also skips bytecode recompilation. The seed is
+  // V8-version-specific; if warm-up fails we skip it rather than abort the build
+  // (the app still works, just colder on first launch). The seed lands in
+  // `blob-store-seed/` at the repo root, included via the `files` glob.
+  try {
+    generateV8CacheSeed();
+  } catch (error) {
+    console.warn(
+      `Skipping V8 cache seed (warm-up failed): ${error.message}`
+    );
+  }
   if (ARGS.next) {
     options.extraMetadata.productName = displayName;
     if (!process.env.CI && !parsedPackageJson.version.endsWith('-next')) {
