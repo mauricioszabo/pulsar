@@ -1,0 +1,109 @@
+diff --git a/node_modules/electron-link/lib/file-require-transform.js b/node_modules/electron-link/lib/file-require-transform.js
+index 07d7430..2a74388 100644
+--- a/node_modules/electron-link/lib/file-require-transform.js
++++ b/node_modules/electron-link/lib/file-require-transform.js
+@@ -5,15 +5,61 @@ const astUtil = require('ast-util-plus')
+ const b = recast.types.builders
+ const resolve = require('resolve')
+ const acorn = require('recast/parsers/acorn')
++const babel = require('@babel/core')
++
++// recast's bundled ast-types (0.14) predates ES2022 class fields and other
++// modern syntax, so it can't walk/print sources that use them. Rather than
++// rewrite electron-link's intricate require-deferral transform against a new AST
++// library, we down-level only the modern syntax to its ES2020 equivalent before
++// recast ever sees it. The output is semantically identical and recast-parseable.
++// (Pulsar patch — see patches/electron-link+0.6.0.patch.)
++const MODERN_SYNTAX_PLUGINS = [
++  '@babel/plugin-proposal-class-properties',
++  '@babel/plugin-proposal-logical-assignment-operators',
++  '@babel/plugin-proposal-optional-chaining',
++  '@babel/plugin-proposal-export-namespace-from',
++  '@babel/plugin-proposal-object-rest-spread'
++]
++
++function downlevelModernSyntax (source) {
++  try {
++    return babel.transformSync(source, {
++      babelrc: false,
++      configFile: false,
++      compact: false,
++      sourceMaps: false,
++      plugins: MODERN_SYNTAX_PLUGINS
++    }).code
++  } catch (e) {
++    // If Babel can't handle it, fall back to the original source and let recast
++    // try — this preserves the previous behaviour for anything Babel rejects.
++    // Warn so a genuine Babel failure is visible instead of resurfacing as a
++    // confusing recast parse error.
++    console.warn(`##[warning] Babel down-level pass failed; using original source: ${e.message}`)
++    return source
++  }
++}
+ 
+ const GLOBALS = new Set(['global', 'window', 'process', 'document', 'console'])
++// The original hardcoded list predates modern builtins (perf_hooks,
++// worker_threads, inspector, async_hooks, node:sqlite, …). Seed from Node's own
++// `builtinModules` so every core module is recognised and deferred rather than
++// walked as a file. (Pulsar patch.)
+ const NODE_CORE_MODULES = new Set([
+   'assert', 'buffer', 'child_process', 'cluster', 'constants', 'crypto',
+   'dgram', 'dns', 'domain', 'events', 'fs', 'http', 'https', 'module', 'net',
+   'os', 'path', 'punycode', 'querystring', 'readline', 'repl', 'stream',
+-  'string_decoder', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'zlib'
++  'string_decoder', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'zlib',
++  ...require('module').builtinModules.map(m => m.replace(/^node:/, ''))
+ ])
+ 
++// True for any Node builtin, with or without the `node:` scheme prefix.
++function isNodeBuiltin (moduleName) {
++  if (typeof moduleName !== 'string') return false
++  if (moduleName.startsWith('node:')) return true
++  return NODE_CORE_MODULES.has(moduleName)
++}
++
+ module.exports = class FileRequireTransform {
+   constructor (options) {
+     this.options = options
+@@ -25,12 +71,17 @@ module.exports = class FileRequireTransform {
+       // Replace line separator and paragraph separator character (which aren't
+       // supported inside javascript strings) with escape unicode sequences.
+       source = "module.exports = " + source.replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
++    } else {
++      // Down-level ES2022+ syntax (class fields, logical-assignment, etc.) that
++      // recast's old ast-types can't parse. (Pulsar patch.)
++      source = downlevelModernSyntax(source)
+     }
+     this.ast = recast.parse(source, {
+       parser: {
+         parse(source) {
+           return acorn.parse(source, {
+-            ecmaVersion: 2020,
++            ecmaVersion: 'latest',
++            allowHashBang: true,
+             sourceType: 'script'
+           })
+         }
+@@ -58,7 +109,9 @@ module.exports = class FileRequireTransform {
+             astPath.get('arguments', 0).replace(b.literal(relativeModulePath))
+           }
+ 
+-          const deferRequire = NODE_CORE_MODULES.has(moduleName) || self.options.didFindRequire(moduleName, absoluteModulePath || moduleName)
++          // Defer all Node builtins (incl. modern ones and `node:`-prefixed)
++          // so they are never walked as files. (Pulsar patch.)
++          const deferRequire = isNodeBuiltin(moduleName) || self.options.didFindRequire(moduleName, absoluteModulePath || moduleName)
+           if (deferRequire && isTopLevelASTPath(astPath)) {
+             self.replaceAssignmentOrDeclarationWithLazyFunction(astPath)
+           }
+@@ -241,6 +294,11 @@ module.exports = class FileRequireTransform {
+   }
+ 
+   resolveModulePath (moduleName) {
++    // Node builtins (incl. `node:`-prefixed and modern ones) are core modules;
++    // never resolve them to a file. (Pulsar patch.)
++    if (isNodeBuiltin(moduleName)) {
++      return null
++    }
+     try {
+       const absolutePath = resolve.sync(moduleName, {basedir: path.dirname(this.options.filePath), extensions: ['.js', '.json']})
+       const isCoreNodeModule = absolutePath.indexOf(path.sep) === -1
