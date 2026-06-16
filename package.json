@@ -289,6 +289,7 @@
   "scripts": {
     "build": "electron-rebuild",
     "build:apm": "cd ppm && yarn install",
+    "postinstall": "patch-package",
     "start": "electron --no-sandbox --enable-logging . -f",
     "dist": "node script/electron-builder.js",
     "js-docs": "jsdoc2md --files src --configure docs/.jsdoc.json > ./docs/Pulsar-API-Documentation.md",
@@ -302,13 +303,18 @@
     "@playwright/test": "1.22.2",
     "electron": "42.3.2",
     "electron-builder": "23.3.1",
+    "electron-link": "0.6.0",
+    "electron-mksnapshot": "42.3.2",
     "eslint": "^8.33.0",
     "eslint-plugin-jsdoc": "^39.7.4",
     "eslint-plugin-node": "^11.1.0",
     "jsdoc-to-markdown": "^8.0.0",
+    "patch-package": "^8",
     "playwright": "1.22.2",
     "playwright-core": "1.22.2",
+    "postinstall-postinstall": "^2.1.0",
     "random-seed": "0.3.0",
+    "terser": "^5.48.0",
     "webdriverio": "7.20.9"
   },
   "resolutions": {

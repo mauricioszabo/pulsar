@@ -109,4 +109,51 @@ describe('FileSystemBlobStore', function() {
     expect(blobStore.get('a')).toEqual(Buffer.from('x'));
     expect(blobStore.get('b')).toEqual(Buffer.from('y'));
   });
+
+  describe('with a read-only fallback seed', function() {
+    let fallbackDirectory;
+
+    beforeEach(function() {
+      fallbackDirectory = temp.path('atom-spec-blobstore-seed');
+      // Build a seed by saving a store, then point new stores at it as fallback.
+      const seed = FileSystemBlobStore.load(fallbackDirectory);
+      seed.set('seeded', Buffer.from('seeded-value'));
+      seed.save();
+    });
+
+    afterEach(() => fs.removeSync(fallbackDirectory));
+
+    it('reads from the seed when the writable store is empty', function() {
+      blobStore = FileSystemBlobStore.load(storageDirectory, fallbackDirectory);
+      expect(blobStore.get('seeded')).toEqual(Buffer.from('seeded-value'));
+    });
+
+    it('prefers the writable store over the seed when both exist', function() {
+      blobStore.set('seeded', Buffer.from('writable-value'));
+      blobStore.save();
+
+      blobStore = FileSystemBlobStore.load(storageDirectory, fallbackDirectory);
+      expect(blobStore.get('seeded')).toEqual(Buffer.from('writable-value'));
+    });
+
+    it('never writes to the seed directory', function() {
+      blobStore = FileSystemBlobStore.load(storageDirectory, fallbackDirectory);
+      blobStore.get('seeded'); // mark as used so it would be dumped on save
+      blobStore.set('fresh', Buffer.from('fresh-value'));
+      blobStore.save();
+
+      // The seed's BLOB must be untouched; the new data lands in the writable dir.
+      const seedBlob = fs.readFileSync(path.join(fallbackDirectory, 'BLOB'));
+      expect(seedBlob).toEqual(Buffer.from('seeded-value'));
+
+      const reloaded = FileSystemBlobStore.load(storageDirectory);
+      expect(reloaded.get('fresh')).toEqual(Buffer.from('fresh-value'));
+    });
+
+    it('is a no-op when neither writable store nor seed exist', function() {
+      const missingSeed = temp.path('atom-spec-blobstore-missing-seed');
+      blobStore = FileSystemBlobStore.load(storageDirectory, missingSeed);
+      expect(blobStore.get('seeded')).toBeUndefined();
+    });
+  });
 });
