@@ -114,6 +114,7 @@
 
 - Bump bundled Node to 20.16.0, to sync with Electron 30.5.1 in Pulsar core repo [@DeeDeeG](https://github.com/pulsar-edit/ppm/pull/168)
 
+* Fix an issue where opening up git worktree doesn't show any git info on the editor
 
 ## 1.131.3
 

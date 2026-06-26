@@ -303,10 +303,10 @@ let options = {
     category: "Development",
     synopsis: "A community-led hyper-hackable text editor",
     target: [
-      { target: 'appimage' },
+      // { target: 'appimage' },
       { target: 'deb' },
-      { target: 'rpm' },
-      { target: 'tar.gz' }
+      // { target: 'rpm' },
+      // { target: 'tar.gz' }
     ],
     extraResources: [
       {

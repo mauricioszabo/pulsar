@@ -23,10 +23,10 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-14, windows-latest ]
+        os: [ ubuntu-latest ]
         include:
           - os: ubuntu-latest
-            image: "debian:10"
+            image: "debian:13"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.image }}
@@ -34,14 +34,9 @@ jobs:
       timestamp: ${{ steps.linux-binary-version.outputs.timestamp }}
 
     steps:
-    - name: Edit sources.list - Linux
-      if: ${{ runner.os == 'Linux' }}
-      run: |
-        sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list
-        sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
     - name: Install build dependencies - Linux
       if: ${{ runner.os == 'Linux' }}
-      run: apt-get update && apt-get install -y git python3 python3-pip make gcc g++ libx11-dev libxkbfile-dev pkg-config libsecret-1-dev rpm xvfb ffmpeg zstd wget squashfs-tools libwayland-dev libwayland-client0 libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0 xkb-data
+      run: apt-get update && apt-get install -y git file python3 python3-pip make gcc g++ libx11-dev libxkbfile-dev pkg-config libsecret-1-dev rpm xvfb ffmpeg zstd wget squashfs-tools libwayland-dev libwayland-client0 libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0 xkb-data
        libncursesw5-dev libssl-dev libsqlite3-dev tk-dev libgdbm-dev libc6-dev libbz2-dev libffi-dev zlib1g-dev # <-- Python-related stuff on this line
 
     - name: Restore Compiled Python from Cache - Linux
@@ -234,10 +229,6 @@ jobs:
     - name: Rename Pulsar Binaries for Regular release (Windows)
       if: ${{ runner.os == 'Windows' }}
       run: node ./script/rename.js "Windows"
-
-    - name: Fix AppImage target - Linux
-      if: ${{ runner.os == 'Linux' }}
-      run: ./script/fix-linux-appimage.sh x86_64
 
     - name: Cache Pulsar Binaries - Linux
       if: ${{ runner.os == 'Linux' }}

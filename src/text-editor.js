@@ -86,14 +86,30 @@ module.exports = class TextEditor {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateStyles();
+    TextEditorComponent.didUpdateStyles();
+    // Also notify the experimental SolidJS-based component if any
+    // editors are using it (core.useNewTextEditor === true). Without
+    // this, font/zoom/theme changes wouldn't trigger a re-measure on
+    // those editors and the cursor would drift away from the text.
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static didUpdateScrollbarStyles() {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateScrollbarStyles();
+    TextEditorComponent.didUpdateScrollbarStyles();
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateScrollbarStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static viewForItem(item) {
@@ -3822,6 +3838,11 @@ module.exports = class TextEditor {
     return this.expandSelectionsForward(selection => selection.selectWord());
   }
 
+  // Extended: Select the subword surrounding each cursor.
+  selectSubwordsContainingCursors() {
+    return this.expandSelectionsForward(selection => selection.selectSubword());
+  }
+
   // Selection Extended
 
   // Extended: For each selection, move its cursor to the preceding word boundary
@@ -5305,11 +5326,22 @@ module.exports = class TextEditor {
   // Get the Element for the editor.
   getElement() {
     if (!this.component) {
-      if (!TextEditorComponent)
-        TextEditorComponent = require('./text-editor-component');
+      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
+      // the experimental SolidJS-based implementation under
+      // `src/pulsar-text-editor/`. This is the model-driven creation
+      // path; the parallel path in text-editor-element.js#getComponent
+      // honors the same flag.
+      const useNew =
+        global.atom &&
+        global.atom.config &&
+        global.atom.config.get('core.useNewTextEditor') === true;
+      const ComponentClass = useNew
+        ? require('./pulsar-text-editor')
+        : (TextEditorComponent ||
+            (TextEditorComponent = require('./text-editor-component')));
       if (!TextEditorElement)
         TextEditorElement = require('./text-editor-element');
-      this.component = new TextEditorComponent({
+      this.component = new ComponentClass({
         model: this,
         updatedSynchronously: TextEditorElement.prototype.updatedSynchronously,
         initialScrollTopRow: this.initialScrollTopRow,
