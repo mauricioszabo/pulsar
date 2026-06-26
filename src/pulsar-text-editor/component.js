@@ -179,11 +179,14 @@ class PulsarTextEditorComponent {
     this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
     this.element.appendChild(this.hiddenInput);
 
+    const isMini = this.props.model.isMini();
+
     // Root layout div: flex column, fills element.
     this._rootEl = document.createElement('div');
     this._rootEl.className = 'pulsar-editor-root';
     this._rootEl.style.cssText =
-      'display: flex; flex-direction: column; width: 100%; height: 100%; ' +
+      'display: flex; flex-direction: column; width: 100%; ' +
+      (isMini ? 'height: auto; ' : 'height: 100%; ') +
       'overflow: hidden; box-sizing: border-box;';
     this.element.appendChild(this._rootEl);
 
@@ -204,7 +207,9 @@ class PulsarTextEditorComponent {
     // Editor body: flex row — gutter (sticky) + scroll-view.
     this._bodyEl = document.createElement('div');
     this._bodyEl.style.cssText =
-      'display: flex; flex-direction: row; flex: 1; overflow: hidden; min-height: 0;';
+      'display: flex; flex-direction: row; ' +
+      (isMini ? 'flex: 0 0 auto; ' : 'flex: 1; ') +
+      'overflow: hidden; min-height: 0;';
     this._rootEl.appendChild(this._bodyEl);
 
     // Gutter view.
@@ -342,9 +347,9 @@ class PulsarTextEditorComponent {
     if (this.props.model.isMini()) {
       this.element.setAttribute('mini', '');
       this.element.classList.add('mini');
+    } else {
+      this.element.style.contain = 'size';
     }
-
-    this.element.style.contain = 'size';
 
     this._mounted = true;
 
@@ -405,6 +410,7 @@ class PulsarTextEditorComponent {
     const model = this.props.model
     if (!this._mounted || !this.isVisible() || model.isDestroyed()) return;
 
+    this._syncMiniEditorDimensions();
     this._syncViewportDimensions();
     this.updateModelSoftWrapColumn();
     this._flushPendingAutoscroll();
@@ -810,6 +816,27 @@ class PulsarTextEditorComponent {
   scheduleUpdate() { this._scheduleUpdate(); }
   updateSync() { this._render(); }
 
+  _syncMiniEditorDimensions() {
+    if (!this.props.model.isMini()) return false;
+
+    let lineHeight = this._lineHeight;
+    if (!lineHeight && this.element) {
+      const computedStyle = window.getComputedStyle(this.element);
+      lineHeight = parseFloat(computedStyle.lineHeight) || parseFloat(computedStyle.fontSize) || 0;
+    }
+    if (!lineHeight) return false;
+
+    const height = Math.ceil(lineHeight) + 'px';
+    let changed = false;
+    for (const element of [this._rootEl, this._bodyEl, this._scrollViewEl, this._scroller]) {
+      if (element && element.style.height !== height) {
+        element.style.height = height;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   _syncViewportDimensions() {
     if (!this._scroller) return false;
 
@@ -836,6 +863,9 @@ class PulsarTextEditorComponent {
   }
 
   isVisible() {
+    if (this.props.model.isMini()) {
+      return this.element.isConnected;
+    }
     return this.element.offsetWidth > 0 || this.element.offsetHeight > 0;
   }
 
