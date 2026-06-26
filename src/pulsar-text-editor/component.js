@@ -133,6 +133,8 @@ class PulsarTextEditorComponent {
       getLineHeight: () => this._lineHeight,
       getCharWidth: () => this._charWidth,
       getScroller: () => this._scroller,
+      getContentElement: () => this._linesWrapper,
+      getPixelPositionForScreenPosition: (screenPosition) => this.pixelPositionForScreenPosition(screenPosition),
       getPixelTopForRow: () => this._pixelTopForRow,
       getElement: () => this.element
     });
@@ -162,6 +164,8 @@ class PulsarTextEditorComponent {
     // DOM setup.
     while (this.element.firstChild) this.element.removeChild(this.element.firstChild);
 
+    this.element.classList.add('editor');
+
     // Hidden input: captures typed text as `input` events.
     this.hiddenInput = document.createElement('input');
     this.hiddenInput.classList.add('hidden-input');
@@ -175,11 +179,14 @@ class PulsarTextEditorComponent {
     this.hiddenInput.addEventListener('blur', this._onHiddenInputBlur.bind(this));
     this.element.appendChild(this.hiddenInput);
 
+    const isMini = this.props.model.isMini();
+
     // Root layout div: flex column, fills element.
     this._rootEl = document.createElement('div');
     this._rootEl.className = 'pulsar-editor-root';
     this._rootEl.style.cssText =
-      'display: flex; flex-direction: column; width: 100%; height: 100%; ' +
+      'display: flex; flex-direction: column; width: 100%; ' +
+      (isMini ? 'height: auto; ' : 'height: 100%; ') +
       'overflow: hidden; box-sizing: border-box;';
     this.element.appendChild(this._rootEl);
 
@@ -200,7 +207,9 @@ class PulsarTextEditorComponent {
     // Editor body: flex row — gutter (sticky) + scroll-view.
     this._bodyEl = document.createElement('div');
     this._bodyEl.style.cssText =
-      'display: flex; flex-direction: row; flex: 1; overflow: hidden; min-height: 0;';
+      'display: flex; flex-direction: row; ' +
+      (isMini ? 'flex: 0 0 auto; ' : 'flex: 1; ') +
+      'overflow: hidden; min-height: 0;';
     this._rootEl.appendChild(this._bodyEl);
 
     // Gutter view.
@@ -338,6 +347,8 @@ class PulsarTextEditorComponent {
     if (this.props.model.isMini()) {
       this.element.setAttribute('mini', '');
       this.element.classList.add('mini');
+    } else {
+      this.element.style.contain = 'size';
     }
 
     this._mounted = true;
@@ -399,6 +410,7 @@ class PulsarTextEditorComponent {
     const model = this.props.model
     if (!this._mounted || !this.isVisible() || model.isDestroyed()) return;
 
+    this._syncMiniEditorDimensions();
     this._syncViewportDimensions();
     this.updateModelSoftWrapColumn();
     this._flushPendingAutoscroll();
@@ -672,6 +684,22 @@ class PulsarTextEditorComponent {
   _onMouseDown(event) {
     if (event.button !== 0 && event.button !== 1) return;
 
+    // Overlay decorations are siblings of the editor content in the legacy
+    // editor, so content mouse handling never sees clicks inside them. The new
+    // editor listens on the root element in capture phase; preserve the old
+    // contract by leaving overlay clicks to the overlay item itself.
+    const overlay = event.target && event.target.closest('atom-overlay');
+    if (overlay) {
+      // Autocomplete suggestions are not independently focusable UI. Prevent
+      // the mousedown from stealing focus from the editor so that, after the
+      // suggestion is accepted on mouseup, typing can continue immediately.
+      event.preventDefault();
+      if (document.activeElement !== this.hiddenInput) {
+        this.element.focus({ preventScroll: true });
+      }
+      return;
+    }
+
     if (document.activeElement !== this.hiddenInput) {
       this.element.focus({ preventScroll: true });
     }
@@ -772,7 +800,7 @@ class PulsarTextEditorComponent {
     const cw = this._charWidth;
     const y = event.clientY - linesRect.top;
     const x = event.clientX - linesRect.left;
-    const row = this._rowAtPixel ? this._rowAtPixel(y) : Math.max(0, Math.floor(y / lh));
+    const row = this._rowAtPixel(y);
     const clampedRow = Math.min(row, this.props.model.getScreenLineCount() - 1);
     const col = Math.max(0, Math.round(x / cw));
     return this.props.model.clipScreenPosition([clampedRow, col]);
@@ -787,6 +815,27 @@ class PulsarTextEditorComponent {
 
   scheduleUpdate() { this._scheduleUpdate(); }
   updateSync() { this._render(); }
+
+  _syncMiniEditorDimensions() {
+    if (!this.props.model.isMini()) return false;
+
+    let lineHeight = this._lineHeight;
+    if (!lineHeight && this.element) {
+      const computedStyle = window.getComputedStyle(this.element);
+      lineHeight = parseFloat(computedStyle.lineHeight) || parseFloat(computedStyle.fontSize) || 0;
+    }
+    if (!lineHeight) return false;
+
+    const height = Math.ceil(lineHeight) + 'px';
+    let changed = false;
+    for (const element of [this._rootEl, this._bodyEl, this._scrollViewEl, this._scroller]) {
+      if (element && element.style.height !== height) {
+        element.style.height = height;
+        changed = true;
+      }
+    }
+    return changed;
+  }
 
   _syncViewportDimensions() {
     if (!this._scroller) return false;
@@ -814,6 +863,9 @@ class PulsarTextEditorComponent {
   }
 
   isVisible() {
+    if (this.props.model.isMini()) {
+      return this.element.isConnected;
+    }
     return this.element.offsetWidth > 0 || this.element.offsetHeight > 0;
   }
 
@@ -1000,7 +1052,7 @@ class PulsarTextEditorComponent {
   }
 
   didUpdateStyles() {
-    if (this._measure) this._measure();
+    this._measure();
     this._scheduleUpdate();
   }
 
@@ -1231,7 +1283,7 @@ class PulsarTextEditorComponent {
     const lh = this._lineHeight;
     const cw = this._charWidth;
     if (!lh) return this.props.model.clipScreenPosition([0, 0]);
-    const row = this._rowAtPixel ? this._rowAtPixel(top) : Math.max(0, Math.floor(top / lh));
+    const row = this._rowAtPixel(top);
     const col = Math.max(0, Math.round(left / (cw || 1)));
     return this.props.model.clipScreenPosition([row, col]);
   }
@@ -1245,7 +1297,7 @@ class PulsarTextEditorComponent {
 
   renderedScreenLineForRow(_row) { return null; }
   measureDimensions() {
-    const measured = this._measure ? this._measure() : false;
+    const measured = this._measure();
     this._syncViewportDimensions();
     const wrapColumnChanged = this.updateModelSoftWrapColumn();
     return measured || wrapColumnChanged;
