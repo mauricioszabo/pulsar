@@ -64,55 +64,6 @@ function computeLineNumDecoClasses(model) {
   }
   return byRow;
 }
-
-let rangeForOverlayMeasurement = null;
-
-function textNodesForElement(element) {
-  const nodes = [];
-  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-  let node;
-  while ((node = walker.nextNode())) nodes.push(node);
-  return nodes;
-}
-
-function textNodeAndOffsetForColumn(textNodes, column) {
-  if (textNodes.length === 0) return [null, 0];
-  if (column <= 0) return [textNodes[0], 0];
-
-  let previous = 0;
-  for (const node of textNodes) {
-    const next = previous + node.length;
-    if (column <= next) return [node, column - previous];
-    previous = next;
-  }
-
-  const last = textNodes[textNodes.length - 1];
-  return [last, last.length];
-}
-
-function measuredOverlayLeftForScreenPosition(editorElement, row, column, charWidth) {
-  if (!editorElement || !editorElement.querySelector) return null;
-  const lineEl = editorElement.querySelector(`.line[data-screen-row="${row}"]`);
-  if (!lineEl || !lineEl.isConnected) return null;
-
-  const computedStyle = window.getComputedStyle(lineEl);
-  const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
-  const renderedColumnStart = charWidth ? Math.round(paddingLeft / charWidth) : 0;
-  const renderedColumn = column - renderedColumnStart;
-  if (renderedColumn < 0) return null;
-
-  const textNodes = textNodesForElement(lineEl);
-  const [textNode, offset] = textNodeAndOffsetForColumn(textNodes, renderedColumn);
-  if (!textNode) return null;
-
-  rangeForOverlayMeasurement ??= document.createRange();
-  rangeForOverlayMeasurement.setStart(textNode, offset);
-  rangeForOverlayMeasurement.setEnd(textNode, offset);
-
-  const rect = rangeForOverlayMeasurement.getBoundingClientRect();
-  return rect && Number.isFinite(rect.left) ? rect.left : null;
-}
-
 function computeHighlightDecos(model, firstRow, lastRow) {
   if (!model || !model.decorationManager) return [];
   const dm = model.decorationManager;
@@ -404,26 +355,15 @@ class OverlayDecorations {
     const scroller = this._cb.getScroller();
     if (!lh || !cw || !scroller) return;
 
-    const scrollerOffsetTop = scroller.offsetTop;
-    const scrollerOffsetLeft = scroller.offsetLeft;
-    const pixelTopForRow = this._cb.getPixelTopForRow();
-    const pixelTop = (pixelTopForRow
-      ? pixelTopForRow(screenPosition.row)
-      : screenPosition.row * lh) - scroller.scrollTop;
-    const fallbackPixelLeft = screenPosition.column * cw - scroller.scrollLeft;
-    const measuredLeft = measuredOverlayLeftForScreenPosition(
-      this._cb.getElement(),
-      screenPosition.row,
-      screenPosition.column,
-      cw
-    );
-    const leftIsViewportRelative = measuredLeft != null;
+    const contentElement = this._cb.getContentElement();
+    const contentRect = (contentElement || scroller).getBoundingClientRect();
+    const pixelPosition = this._cb.getPixelPositionForScreenPosition(screenPosition)
+    const pixelTopForRow = this._cb.getPixelTopForRow && this._cb.getPixelTopForRow();
+    const pixelTop = pixelPosition.top
+    const pixelLeft = pixelPosition.left
 
-    const editorRect = this._cb.getElement().getBoundingClientRect();
-    let top = editorRect.top + scrollerOffsetTop + pixelTop;
-    let left = leftIsViewportRelative
-      ? measuredLeft
-      : editorRect.left + scrollerOffsetLeft + fallbackPixelLeft;
+    let top = contentRect.top + pixelTop + lh;
+    let left = contentRect.left + pixelLeft;
 
     const itemEl = wrapperEl.firstChild;
     if (itemEl) {
@@ -431,7 +371,7 @@ class OverlayDecorations {
       const windowH = window.innerHeight;
       const windowW = window.innerWidth;
       if (top + itemRect.height > windowH) {
-        const flippedTop = editorRect.top + scrollerOffsetTop + pixelTop - lh - itemRect.height;
+        const flippedTop = top - lh - itemRect.height;
         if (flippedTop >= 0) top = flippedTop;
       }
 

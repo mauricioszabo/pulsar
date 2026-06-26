@@ -133,6 +133,8 @@ class PulsarTextEditorComponent {
       getLineHeight: () => this._lineHeight,
       getCharWidth: () => this._charWidth,
       getScroller: () => this._scroller,
+      getContentElement: () => this._linesWrapper,
+      getPixelPositionForScreenPosition: (screenPosition) => this.pixelPositionForScreenPosition(screenPosition),
       getPixelTopForRow: () => this._pixelTopForRow,
       getElement: () => this.element
     });
@@ -161,6 +163,8 @@ class PulsarTextEditorComponent {
 
     // DOM setup.
     while (this.element.firstChild) this.element.removeChild(this.element.firstChild);
+
+    this.element.classList.add('editor');
 
     // Hidden input: captures typed text as `input` events.
     this.hiddenInput = document.createElement('input');
@@ -339,6 +343,8 @@ class PulsarTextEditorComponent {
       this.element.setAttribute('mini', '');
       this.element.classList.add('mini');
     }
+
+    this.element.style.contain = 'size';
 
     this._mounted = true;
 
@@ -788,7 +794,7 @@ class PulsarTextEditorComponent {
     const cw = this._charWidth;
     const y = event.clientY - linesRect.top;
     const x = event.clientX - linesRect.left;
-    const row = this._rowAtPixel ? this._rowAtPixel(y) : Math.max(0, Math.floor(y / lh));
+    const row = this._rowAtPixel(y);
     const clampedRow = Math.min(row, this.props.model.getScreenLineCount() - 1);
     const col = Math.max(0, Math.round(x / cw));
     return this.props.model.clipScreenPosition([clampedRow, col]);
@@ -1016,7 +1022,7 @@ class PulsarTextEditorComponent {
   }
 
   didUpdateStyles() {
-    if (this._measure) this._measure();
+    this._measure();
     this._scheduleUpdate();
   }
 
@@ -1247,7 +1253,7 @@ class PulsarTextEditorComponent {
     const lh = this._lineHeight;
     const cw = this._charWidth;
     if (!lh) return this.props.model.clipScreenPosition([0, 0]);
-    const row = this._rowAtPixel ? this._rowAtPixel(top) : Math.max(0, Math.floor(top / lh));
+    const row = this._rowAtPixel(top);
     const col = Math.max(0, Math.round(left / (cw || 1)));
     return this.props.model.clipScreenPosition([row, col]);
   }
@@ -1261,7 +1267,7 @@ class PulsarTextEditorComponent {
 
   renderedScreenLineForRow(_row) { return null; }
   measureDimensions() {
-    const measured = this._measure ? this._measure() : false;
+    const measured = this._measure();
     this._syncViewportDimensions();
     const wrapColumnChanged = this.updateModelSoftWrapColumn();
     return measured || wrapColumnChanged;
