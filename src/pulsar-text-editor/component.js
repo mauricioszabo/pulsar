@@ -672,6 +672,22 @@ class PulsarTextEditorComponent {
   _onMouseDown(event) {
     if (event.button !== 0 && event.button !== 1) return;
 
+    // Overlay decorations are siblings of the editor content in the legacy
+    // editor, so content mouse handling never sees clicks inside them. The new
+    // editor listens on the root element in capture phase; preserve the old
+    // contract by leaving overlay clicks to the overlay item itself.
+    const overlay = event.target && event.target.closest('atom-overlay');
+    if (overlay) {
+      // Autocomplete suggestions are not independently focusable UI. Prevent
+      // the mousedown from stealing focus from the editor so that, after the
+      // suggestion is accepted on mouseup, typing can continue immediately.
+      event.preventDefault();
+      if (document.activeElement !== this.hiddenInput) {
+        this.element.focus({ preventScroll: true });
+      }
+      return;
+    }
+
     if (document.activeElement !== this.hiddenInput) {
       this.element.focus({ preventScroll: true });
     }

@@ -386,6 +386,10 @@ class OverlayDecorations {
     const entry = this._map.get(decoration);
     if (!entry) return;
     const { wrapperEl } = entry;
+    const editorElement = this._cb.getElement();
+    if (wrapperEl.parentNode === editorElement && wrapperEl.nextSibling) {
+      editorElement.appendChild(wrapperEl);
+    }
     const props = decoration.getProperties ? decoration.getProperties() : decoration.properties;
     if (!props) return;
     const marker = decoration.getMarker ? decoration.getMarker() : null;
@@ -415,29 +419,26 @@ class OverlayDecorations {
     );
     const leftIsViewportRelative = measuredLeft != null;
 
-    let top = scrollerOffsetTop + pixelTop + lh;
+    const editorRect = this._cb.getElement().getBoundingClientRect();
+    let top = editorRect.top + scrollerOffsetTop + pixelTop;
     let left = leftIsViewportRelative
       ? measuredLeft
-      : scrollerOffsetLeft + fallbackPixelLeft;
+      : editorRect.left + scrollerOffsetLeft + fallbackPixelLeft;
 
     const itemEl = wrapperEl.firstChild;
     if (itemEl) {
       const itemRect = itemEl.getBoundingClientRect();
-      const editorRect = this._cb.getElement().getBoundingClientRect();
       const windowH = window.innerHeight;
       const windowW = window.innerWidth;
-      const absTop = editorRect.top + top;
-      if (absTop + itemRect.height > windowH) {
-        const flippedTop = scrollerOffsetTop + pixelTop - itemRect.height;
-        if (editorRect.top + flippedTop >= 0) top = flippedTop;
+      if (top + itemRect.height > windowH) {
+        const flippedTop = editorRect.top + scrollerOffsetTop + pixelTop - lh - itemRect.height;
+        if (flippedTop >= 0) top = flippedTop;
       }
 
       if (props.avoidOverflow !== false) {
         const computedStyle = window.getComputedStyle(itemEl);
         const marginLeft = parseInt(computedStyle.marginLeft, 10) || 0;
-        const itemLeft = leftIsViewportRelative
-          ? left + marginLeft
-          : editorRect.left + left + marginLeft;
+        const itemLeft = left + marginLeft;
         const itemRight = itemLeft + itemRect.width;
         if (itemLeft < 0) {
           left -= itemLeft;
