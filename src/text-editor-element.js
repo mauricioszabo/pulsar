@@ -1,6 +1,7 @@
 const { Emitter, Range } = require('atom');
 const Grim = require('grim');
 const TextEditorComponent = require('./text-editor-component');
+const getTextEditorImplementation = require('./get-text-editor-implementation');
 const dedent = require('dedent');
 
 class TextEditorElement extends HTMLElement {
@@ -287,19 +288,20 @@ class TextEditorElement extends HTMLElement {
 
   getComponent() {
     if (!this.component) {
-      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
-      // the experimental SolidJS-based implementation under
-      // `src/pulsar-text-editor/`. Default is the legacy Etch component.
-      // Note: this is read once per element, so toggling the flag at
+      // The `core.textEditorImplementation` setting (see ADR 006) selects
+      // between the legacy Etch component and the experimental Pulsar ones.
+      // Note: this is read once per element, so toggling the setting at
       // runtime only affects newly-created editors; existing ones keep
       // whichever implementation they were constructed with.
-      const useNew =
-        global.atom &&
-        global.atom.config &&
-        global.atom.config.get('core.useNewTextEditor') === true;
-      const ComponentClass = useNew
-        ? require('./pulsar-text-editor')
-        : TextEditorComponent;
+      const implementation = getTextEditorImplementation();
+      let ComponentClass;
+      if (implementation === 'pulsar-tree-sitter') {
+        ComponentClass = require('./pulsar-text-editor/tree-sitter-component');
+      } else if (implementation === 'pulsar') {
+        ComponentClass = require('./pulsar-text-editor');
+      } else {
+        ComponentClass = TextEditorComponent;
+      }
       this.component = new ComponentClass({
         element: this,
         mini: this.hasAttribute('mini'),

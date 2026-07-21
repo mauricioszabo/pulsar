@@ -12,6 +12,7 @@ const Selection = require('./selection');
 const NullGrammar = require('./null-grammar');
 const TextMateLanguageMode = require('./text-mate-language-mode');
 const ScopeDescriptor = require('./scope-descriptor');
+const getTextEditorImplementation = require('./get-text-editor-implementation');
 
 const TextMateScopeSelector = require('second-mate').ScopeSelector;
 const GutterContainer = require('./gutter-container');
@@ -87,10 +88,12 @@ module.exports = class TextEditor {
       TextEditorComponent = require('./text-editor-component');
     }
     TextEditorComponent.didUpdateStyles();
-    // Also notify the experimental SolidJS-based component if any
-    // editors are using it (core.useNewTextEditor === true). Without
-    // this, font/zoom/theme changes wouldn't trigger a re-measure on
-    // those editors and the cursor would drift away from the text.
+    // Also notify the experimental Pulsar component if any editors are
+    // using it (core.textEditorImplementation is 'pulsar' or
+    // 'pulsar-tree-sitter'; the tree-sitter component shares the base's
+    // static instance registry). Without this, font/zoom/theme changes
+    // wouldn't trigger a re-measure on those editors and the cursor would
+    // drift away from the text.
     try {
       const PulsarTextEditor = require('./pulsar-text-editor');
       PulsarTextEditor.didUpdateStyles();
@@ -5321,19 +5324,21 @@ module.exports = class TextEditor {
   // Get the Element for the editor.
   getElement() {
     if (!this.component) {
-      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
-      // the experimental SolidJS-based implementation under
-      // `src/pulsar-text-editor/`. This is the model-driven creation
-      // path; the parallel path in text-editor-element.js#getComponent
-      // honors the same flag.
-      const useNew =
-        global.atom &&
-        global.atom.config &&
-        global.atom.config.get('core.useNewTextEditor') === true;
-      const ComponentClass = useNew
-        ? require('./pulsar-text-editor')
-        : (TextEditorComponent ||
-            (TextEditorComponent = require('./text-editor-component')));
+      // The `core.textEditorImplementation` setting (see ADR 006) selects
+      // between the legacy Etch component and the experimental Pulsar ones.
+      // This is the model-driven creation path; the parallel path in
+      // text-editor-element.js#getComponent honors the same setting.
+      const implementation = getTextEditorImplementation();
+      let ComponentClass;
+      if (implementation === 'pulsar-tree-sitter') {
+        ComponentClass = require('./pulsar-text-editor/tree-sitter-component');
+      } else if (implementation === 'pulsar') {
+        ComponentClass = require('./pulsar-text-editor');
+      } else {
+        ComponentClass =
+          TextEditorComponent ||
+          (TextEditorComponent = require('./text-editor-component'));
+      }
       if (!TextEditorElement)
         TextEditorElement = require('./text-editor-element');
       this.component = new ComponentClass({

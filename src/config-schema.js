@@ -139,11 +139,16 @@ const configSchema = {
         default: false,
         description: "Prompt before saving a file in a conflicted state, as happens when a file’s contents on disk are changed by another program while edits are pending."
       },
-      useNewTextEditor: {
-        type: 'boolean',
-        title: 'Experimental: Use New Text Editor',
-        default: false,
-        description: 'Render `atom-text-editor` elements with the new SolidJS-based implementation instead of the legacy Etch one. The new implementation is incomplete; expect missing features. Restart required after changing.'
+      textEditorImplementation: {
+        type: 'string',
+        title: 'Text Editor Implementation',
+        default: 'atom',
+        description: 'Which renderer to use for `atom-text-editor` elements (see ADR 006). The Pulsar implementations are incomplete; expect missing features. Reopen editors (or restart) after changing.',
+        enum: [
+          { value: 'atom', description: 'Use Atom implementation (stable)' },
+          { value: 'pulsar', description: 'Use Pulsar new implementation (experimental)' },
+          { value: 'pulsar-tree-sitter', description: 'Use Pulsar + Tree-Sitter optimized implementation (unstable)' }
+        ]
       },
       fileEncoding: {
         description:
