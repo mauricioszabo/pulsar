@@ -590,6 +590,97 @@ class WASMTreeSitterLanguageMode {
     return new HighlightIterator(this);
   }
 
+  // EXPERIMENTAL — tree-sitter-optimized editor (ADR 006 / "Tree-Sitter
+  // Optimized Text Editor" plan, milestone M2).
+  //
+  // Returns flat highlight tokens for a horizontal window of a single buffer
+  // row: an ordered array of `{ column, text, scopeIds }`, where each token is
+  // a maximal run of text over which the set of active Tree-sitter scopes is
+  // constant. `scopeIds` are numeric ids resolvable with `classNameForScopeId`.
+  //
+  // Unlike the display-layer highlighting path, the query is bounded to the
+  // requested `[startColumn, endColumn)` window, so tokenizing a screenful of a
+  // 100k-character minified line costs O(window), not O(line length). Long
+  // lines that the full-line path skips entirely (see
+  // `LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING`) still highlight within the window.
+  //
+  // Returns `null` when there's no syntax tree yet (the caller should fall back
+  // to a non-tree-sitter render path).
+  getScreenLineTokens(row, startColumn = 0, endColumn = Infinity) {
+    if (!this.rootLanguageLayer || !this.rootLanguageLayer.tree) return null;
+
+    const lineText = this.buffer.lineForRow(row);
+    if (lineText == null) return [];
+
+    const clipStart = Math.max(0, startColumn);
+    const clipEnd = Math.min(lineText.length, endColumn);
+    if (clipStart >= clipEnd) return [];
+
+    const iterator = this.buildHighlightIterator();
+    // `seek` returns the scopes already open at the window start; that's our
+    // initial active-scope stack. It also bounds the highlight query to
+    // `clipEnd` (the third argument) so long lines aren't tokenized in full.
+    let scopeIds = (iterator.seek({ row, column: clipStart }, row, clipEnd) || []).slice();
+
+    const tokens = [];
+    let column = clipStart;
+
+    while (true) {
+      const position = iterator.getPosition();
+      const boundaryColumn =
+        position.row > row ? clipEnd : Math.min(position.column, clipEnd);
+
+      if (boundaryColumn > column) {
+        tokens.push({
+          column,
+          text: lineText.substring(column, boundaryColumn),
+          scopeIds: scopeIds.slice()
+        });
+        column = boundaryColumn;
+      }
+
+      if (position.row > row || position.column >= clipEnd) break;
+
+      // Apply the boundary: closing scopes act before opening scopes.
+      const closeCount = iterator.getCloseScopeIds().length;
+      for (let i = 0; i < closeCount; i++) scopeIds.pop();
+      scopeIds.push(...iterator.getOpenScopeIds());
+
+      if (!iterator.moveToSuccessor()) {
+        if (clipEnd > column) {
+          tokens.push({
+            column,
+            text: lineText.substring(column, clipEnd),
+            scopeIds: scopeIds.slice()
+          });
+        }
+        break;
+      }
+    }
+
+    return tokens;
+  }
+
+  // EXPERIMENTAL — tree-sitter-optimized editor (milestone M2). Tokenizes a
+  // rectangular viewport by calling `getScreenLineTokens` for each row in
+  // `[startPoint.row, endPoint.row]`, clipped to the
+  // `[startPoint.column, endPoint.column)` window. Returns an array of
+  // `{ row, tokens }`, or `null` if the syntax tree isn't ready.
+  getViewportTokens(startPoint, endPoint) {
+    if (!this.rootLanguageLayer || !this.rootLanguageLayer.tree) return null;
+    const start = Point.fromObject(startPoint, true);
+    const end = Point.fromObject(endPoint, true);
+    const lastRow = Math.min(end.row, this.buffer.getLineCount() - 1);
+    const rows = [];
+    for (let row = start.row; row <= lastRow; row++) {
+      rows.push({
+        row,
+        tokens: this.getScreenLineTokens(row, start.column, end.column) || []
+      });
+    }
+    return rows;
+  }
+
   classNameForScopeId(scopeId) {
     return this.grammar.classNameForScopeId(scopeId);
   }
@@ -2067,7 +2158,7 @@ class HighlightIterator {
     return `[HighlightIterator id=${this.id} iterators=${this.iterators?.length ?? 0}]`;
   }
 
-  seek(start, endRow) {
+  seek(start, endRow, endColumn) {
     if (!(start instanceof Point)) {
       start = Point.fromObject(start, true);
     }
@@ -2091,13 +2182,26 @@ class HighlightIterator {
 
     let end = {
       row: endRow,
-      column: buffer.lineLengthForRow(endRow)
+      column: endColumn == null ? buffer.lineLengthForRow(endRow) : endColumn
     };
 
     this.end = end;
     this.iterators = [];
 
-    if (Math.max(start.column, end.column) > LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING) {
+    // Full-line callers (the historical path) keep their original guard. When
+    // `endColumn` bounds the query to a horizontal window, only the width of
+    // that window matters — a long line highlighted a screenful of columns at a
+    // time stays well under the limit even though the full line is enormous, so
+    // it becomes highlightable where it previously was skipped entirely.
+    let exceedsLimit;
+    if (endColumn == null) {
+      exceedsLimit =
+        Math.max(start.column, end.column) > LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING;
+    } else {
+      let width = end.row > start.row ? end.column : end.column - start.column;
+      exceedsLimit = width > LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING;
+    }
+    if (exceedsLimit) {
       return [];
     }
 
@@ -2138,7 +2242,7 @@ class HighlightIterator {
     // already open scopes) that retains information about where each open
     // scope was opened, because we'll need that information in a moment.
     //
-    let [result, openScopes] = iterator.seek(start, endRow);
+    let [result, openScopes] = iterator.seek(start, endRow, endColumn);
 
     if (rootLanguageLayer?.tree?.rootNode.hasChanges) {
       // The tree is dirty. We should keep going — if we stop now, then the
@@ -2165,7 +2269,7 @@ class HighlightIterator {
     // open scopes, removing any that aren't their layer's base language scope.
     for (const marker of injectionMarkers) {
       const iterator = marker.languageLayer.buildHighlightIterator();
-      let [result, openScopes] = iterator.seek(start, endRow);
+      let [result, openScopes] = iterator.seek(start, endRow, endColumn);
 
       // Just as with the root layer, any injection layer may need to add to
       // the list of open scopes whether or not they need to mark anything
@@ -2407,12 +2511,17 @@ class LayerHighlightIterator {
 
   // If this isn't the root language layer, we need to make sure this iterator
   // doesn't try to go past its marker boundary.
-  _getEndPosition(endRow) {
+  //
+  // When `endColumn` is supplied, the end point is clamped to that column
+  // rather than extending to the end of `endRow`. This lets a consumer restrict
+  // a highlight query to a horizontal window of a (possibly very long) line —
+  // see `WASMTreeSitterLanguageMode::getScreenLineTokens`.
+  _getEndPosition(endRow, endColumn) {
     let { marker } = this.languageLayer;
     let { buffer } = this.languageLayer.languageMode;
     let naiveEndPoint = new Point(
       endRow,
-      buffer.lineLengthForRow(endRow)
+      endColumn == null ? buffer.lineLengthForRow(endRow) : endColumn
     );
 
     if (marker) {
@@ -2485,8 +2594,8 @@ class LayerHighlightIterator {
     }
   }
 
-  seek(start, endRow) {
-    let end = this._getEndPosition(endRow);
+  seek(start, endRow, endColumn) {
+    let end = this._getEndPosition(endRow, endColumn);
     // let isDevMode = atom.inDevMode();
 
     // let timeKey;
