@@ -47,6 +47,33 @@ function buildPlainLineHtml(text, visibleColumnRange) {
   return escapeHtml(text);
 }
 
+// Tree-sitter-optimized path (ADR 006, milestone M3): build a line's HTML from
+// flat tokens produced by `languageMode.getScreenLineTokens`. Each token becomes
+// a single <span> tagged with its buffer `data-ts-row`/`data-ts-col`, all of its
+// active scopes flattened into the class list. Only the columns the tokenizer
+// returned (the visible window) are emitted; the enclosing line's `padding-left`
+// (set by the caller, as for 'long' lines) positions the window horizontally.
+function buildTokensLineHtml(tokens, languageMode, row) {
+  if (!tokens || tokens.length === 0) return NBSP;
+  let html = '';
+  let hasText = false;
+  for (const token of tokens) {
+    if (!token.text) continue;
+    hasText = true;
+    let classes = '';
+    if (token.scopeIds && token.scopeIds.length > 0) {
+      classes = token.scopeIds
+        .map((id) => languageMode.classNameForScopeId(id))
+        .filter(Boolean)
+        .join(' ');
+    }
+    html += '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '"';
+    if (classes) html += ' class="' + escapeHtml(classes) + '"';
+    html += '>' + escapeHtml(token.text) + '</span>';
+  }
+  return hasText ? html : NBSP;
+}
+
 const LINE_CACHE_SLACK = 200;
 
 // Manages all DOM content inside the `.lines-wrapper` scroll container:
@@ -97,6 +124,7 @@ class LinesView {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
+      tokenSource,
     } = state;
 
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
@@ -120,7 +148,20 @@ class LinesView {
       const length = model.lineLengthForScreenRow(r);
       let item;
 
-      if (canUsePlain && length > PLAIN_TEXT_THRESHOLD) {
+      if (tokenSource) {
+        // Tree-sitter-optimized path: tokens come directly from the language
+        // mode's windowed tokenizer, not from display-layer screen lines. The
+        // cached item's identity is stable; the token HTML is rebuilt from the
+        // visible column window on each render (M3 is non-incremental — M4 adds
+        // change-driven repainting).
+        const cached = this._lineCache.get(r);
+        if (cached && cached.mode === 'tokens' && cached.lineLength === length) {
+          item = cached;
+        } else {
+          item = { row: r, mode: 'tokens', lineLength: length };
+          this._lineCache.set(r, item);
+        }
+      } else if (canUsePlain && length > PLAIN_TEXT_THRESHOLD) {
         const bufRow = model.bufferRowForScreenRow(r);
         const text = buffer.lineForRow(bufRow);
         const cached = this._lineCache.get(r);
@@ -160,7 +201,7 @@ class LinesView {
       for (const b of this._blocksAtRow(row, 'before', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
-      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows }));
+      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource }));
       for (const b of this._blocksAtRow(row, 'after', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
@@ -233,7 +274,7 @@ class LinesView {
     if (blockInfo.wrapperElement === el) blockInfo.wrapperElement = null;
   }
 
-  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows }) {
+  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource }) {
     let el = this._lineEls.get(item.row);
     if (!el) {
       el = document.createElement('div');
@@ -264,6 +305,24 @@ class LinesView {
         'min-width: ' + (item.lineLength * cw) + 'px;';
     }
     if (el.style.cssText !== style) el.style.cssText = style;
+
+    // Tree-sitter-optimized path: rebuild token spans from the windowed
+    // tokenizer every render (non-incremental; M4 will cache/repaint by change).
+    if (item.mode === 'tokens') {
+      const from = visColRange ? Math.max(0, visColRange[0]) : 0;
+      const to = visColRange ? visColRange[1] : Infinity;
+      const tokens = tokenSource.getScreenLineTokens(item.row, from, to);
+      if (tokens == null) {
+        // Tree not ready this frame; fall back to plain buffer text so the
+        // line isn't blank.
+        const buffer = tokenSource.buffer;
+        const text = buffer ? buffer.lineForRow(item.row) : '';
+        el.innerHTML = buildPlainLineHtml(text, visColRange);
+      } else {
+        el.innerHTML = buildTokensLineHtml(tokens, tokenSource, item.row);
+      }
+      return el;
+    }
 
     // HTML — only update if the content actually changed.
     // For 'short' lines the key is the cached screenLine object; for

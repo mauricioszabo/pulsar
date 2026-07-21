@@ -406,6 +406,14 @@ class PulsarTextEditorComponent {
     });
   }
 
+  // Hook for subclasses (see PulsarTreeSitterTextEditorComponent). Returning a
+  // non-null object with a `getScreenLineTokens(row, startCol, endCol)` method
+  // makes LinesView render lines from that windowed tokenizer instead of from
+  // display-layer screen lines. The base component never uses it.
+  _lineTokenSource(_model) {
+    return null;
+  }
+
   _render() {
     const model = this.props.model
     if (!this._mounted || !this.isVisible() || model.isDestroyed()) return;
@@ -492,6 +500,7 @@ class PulsarTextEditorComponent {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
+      tokenSource: this._lineTokenSource(model),
     });
 
     if (this._blockDecorations.syncRenderedHeights()) {
