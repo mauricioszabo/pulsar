@@ -58,9 +58,13 @@ function buildPlainLineHtml(text, visibleColumnRange) {
 //
 // Each token's text sits in its own class-less leaf <span> carrying
 // `data-ts-row`/`data-ts-col` (the invalidation handle); it inherits its color
-// from the enclosing scope spans. Consecutive tokens sharing a scope prefix
-// share the ancestor spans — spans open/close only where the scope stack
-// actually changes.
+// from the enclosing scope spans. Scope spans carry the same data attributes,
+// stamped with the position at which they open in this rendered line, so a
+// selector like `[data-ts-row="9"][data-ts-col="0"]` finds BOTH the scope
+// span(s) and the leaf span that start there — deleting the `(` that opened a
+// scope invalidates the pair in one query. Consecutive tokens sharing a scope
+// prefix share the ancestor spans — spans open/close only where the scope
+// stack actually changes.
 function buildTokensLineHtml(tokens, languageMode, row) {
   if (!tokens || tokens.length === 0) return NBSP;
   let html = '';
@@ -83,12 +87,14 @@ function buildTokensLineHtml(tokens, languageMode, row) {
     for (let i = openIds.length - 1; i >= common; i--) html += '</span>';
     openIds.length = common;
 
-    // Open the scopes new to this token.
+    // Open the scopes new to this token, stamped with the position at which
+    // they open in this rendered line.
     for (let i = common; i < ids.length; i++) {
       const cls = languageMode.classNameForScopeId(ids[i]);
-      html += cls
-        ? '<span class="' + escapeHtml(cls) + '">'
-        : '<span>';
+      html +=
+        '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '"' +
+        (cls ? ' class="' + escapeHtml(cls) + '"' : '') +
+        '>';
       openIds.push(ids[i]);
     }
 
