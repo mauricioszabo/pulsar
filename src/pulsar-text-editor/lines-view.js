@@ -145,15 +145,19 @@ class LinesView {
     const visibleItems = [];
 
     for (let r = firstRow; r <= lastRow; r++) {
-      const length = model.lineLengthForScreenRow(r);
       let item;
 
       if (tokenSource) {
         // Tree-sitter-optimized path: tokens come directly from the language
-        // mode's windowed tokenizer, not from display-layer screen lines. The
-        // cached item's identity is stable; the token HTML is rebuilt from the
-        // visible column window on each render (M3 is non-incremental — M4 adds
+        // mode's windowed tokenizer, and the line length comes straight from
+        // the buffer — no display-layer screen-line query at all. The cached
+        // item's identity is stable; the token HTML is rebuilt from the visible
+        // column window on each render (M3 is non-incremental — M4 adds
         // change-driven repainting).
+        const tsBuffer = tokenSource.buffer;
+        const length = tsBuffer
+          ? tsBuffer.lineLengthForRow(r) || 0
+          : model.lineLengthForScreenRow(r);
         const cached = this._lineCache.get(r);
         if (cached && cached.mode === 'tokens' && cached.lineLength === length) {
           item = cached;
@@ -161,7 +165,12 @@ class LinesView {
           item = { row: r, mode: 'tokens', lineLength: length };
           this._lineCache.set(r, item);
         }
-      } else if (canUsePlain && length > PLAIN_TEXT_THRESHOLD) {
+        visibleItems.push(item);
+        continue;
+      }
+
+      const length = model.lineLengthForScreenRow(r);
+      if (canUsePlain && length > PLAIN_TEXT_THRESHOLD) {
         const bufRow = model.bufferRowForScreenRow(r);
         const text = buffer.lineForRow(bufRow);
         const cached = this._lineCache.get(r);

@@ -609,12 +609,20 @@ class WASMTreeSitterLanguageMode {
   getScreenLineTokens(row, startColumn = 0, endColumn = Infinity) {
     if (!this.rootLanguageLayer || !this.rootLanguageLayer.tree) return null;
 
-    const lineText = this.buffer.lineForRow(row);
-    if (lineText == null) return [];
+    const lineLength = this.buffer.lineLengthForRow(row);
+    if (lineLength == null) return [];
 
     const clipStart = Math.max(0, startColumn);
-    const clipEnd = Math.min(lineText.length, endColumn);
+    const clipEnd = Math.min(lineLength, endColumn);
     if (clipStart >= clipEnd) return [];
+
+    // Read ONLY the visible window from the buffer — never materialize the whole
+    // (possibly 100k+ character) line. `windowText[i]` is column `clipStart + i`.
+    const windowText = this.buffer.getTextInRange(
+      new Range(new Point(row, clipStart), new Point(row, clipEnd))
+    );
+    const textAt = (from, to) =>
+      windowText.substring(from - clipStart, to - clipStart);
 
     const iterator = this.buildHighlightIterator();
     // `seek` returns the scopes already open at the window start; that's our
@@ -633,7 +641,7 @@ class WASMTreeSitterLanguageMode {
       if (boundaryColumn > column) {
         tokens.push({
           column,
-          text: lineText.substring(column, boundaryColumn),
+          text: textAt(column, boundaryColumn),
           scopeIds: scopeIds.slice()
         });
         column = boundaryColumn;
@@ -650,7 +658,7 @@ class WASMTreeSitterLanguageMode {
         if (clipEnd > column) {
           tokens.push({
             column,
-            text: lineText.substring(column, clipEnd),
+            text: textAt(column, clipEnd),
             scopeIds: scopeIds.slice()
           });
         }
