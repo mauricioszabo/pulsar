@@ -48,29 +48,56 @@ function buildPlainLineHtml(text, visibleColumnRange) {
 }
 
 // Tree-sitter-optimized path (ADR 006, milestone M3): build a line's HTML from
-// flat tokens produced by `languageMode.getScreenLineTokens`. Each token becomes
-// a single <span> tagged with its buffer `data-ts-row`/`data-ts-col`, all of its
-// active scopes flattened into the class list. Only the columns the tokenizer
-// returned (the visible window) are emitted; the enclosing line's `padding-left`
-// (set by the caller, as for 'long' lines) positions the window horizontally.
+// flat tokens produced by `languageMode.getScreenLineTokens`.
+//
+// Scope spans are NESTED, exactly like the legacy renderer: one <span> per open
+// scope, with only that scope's `syntax--…` classes on it. That is what theme
+// CSS is written against — flattening the whole scope stack onto one class
+// attribute makes selectors like `.syntax--function` match a token (e.g. a
+// comma) that is merely *inside* a function, coloring it wrongly.
+//
+// Each token's text sits in its own class-less leaf <span> carrying
+// `data-ts-row`/`data-ts-col` (the invalidation handle); it inherits its color
+// from the enclosing scope spans. Consecutive tokens sharing a scope prefix
+// share the ancestor spans — spans open/close only where the scope stack
+// actually changes.
 function buildTokensLineHtml(tokens, languageMode, row) {
   if (!tokens || tokens.length === 0) return NBSP;
   let html = '';
   let hasText = false;
+  const openIds = [];
   for (const token of tokens) {
     if (!token.text) continue;
     hasText = true;
-    let classes = '';
-    if (token.scopeIds && token.scopeIds.length > 0) {
-      classes = token.scopeIds
-        .map((id) => languageMode.classNameForScopeId(id))
-        .filter(Boolean)
-        .join(' ');
+    const ids = token.scopeIds || [];
+
+    // Keep the shared prefix of already-open scope spans; close the rest.
+    let common = 0;
+    while (
+      common < openIds.length &&
+      common < ids.length &&
+      openIds[common] === ids[common]
+    ) {
+      common++;
     }
-    html += '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '"';
-    if (classes) html += ' class="' + escapeHtml(classes) + '"';
-    html += '>' + escapeHtml(token.text) + '</span>';
+    for (let i = openIds.length - 1; i >= common; i--) html += '</span>';
+    openIds.length = common;
+
+    // Open the scopes new to this token.
+    for (let i = common; i < ids.length; i++) {
+      const cls = languageMode.classNameForScopeId(ids[i]);
+      html += cls
+        ? '<span class="' + escapeHtml(cls) + '">'
+        : '<span>';
+      openIds.push(ids[i]);
+    }
+
+    html +=
+      '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '">' +
+      escapeHtml(token.text) +
+      '</span>';
   }
+  for (let i = 0; i < openIds.length; i++) html += '</span>';
   return hasText ? html : NBSP;
 }
 
