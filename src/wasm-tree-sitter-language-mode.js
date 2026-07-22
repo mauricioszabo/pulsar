@@ -650,9 +650,10 @@ class WASMTreeSitterLanguageMode {
         continue;
       }
       if (openScopes) {
-        for (const scopes of openScopes.values()) {
-          initialScopeIds.push(...scopes);
-        }
+        // getScopesArray flattens in buffer-position order (an OpenScopeMap
+        // method that exists precisely because Map insertion order isn't a
+        // reliable proxy for position order here).
+        initialScopeIds.push(...openScopes.getScopesArray());
       }
       let it = boundaries && boundaries.begin;
       while (it && it.key) {
