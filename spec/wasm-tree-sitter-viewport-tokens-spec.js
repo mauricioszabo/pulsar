@@ -33,12 +33,16 @@ describe('WASMTreeSitterLanguageMode viewport tokens (M2)', () => {
   let editor, buffer, grammar, languageMode;
 
   // Resolve each token's numeric scopeIds to scope names for readable
-  // assertions.
+  // assertions. The grammar's base scope (e.g. `source.js`) is present on
+  // every token; filter it out so expectations stay focused.
   function named(tokens) {
+    const base = grammar.scopeName;
     return tokens.map((t) => ({
       column: t.column,
       text: t.text,
-      scopes: t.scopeIds.map((id) => languageMode.scopeNameForScopeId(id))
+      scopes: t.scopeIds
+        .map((id) => languageMode.scopeNameForScopeId(id))
+        .filter((s) => s !== base)
     }));
   }
 
@@ -77,52 +81,49 @@ describe('WASMTreeSitterLanguageMode viewport tokens (M2)', () => {
       ]);
     });
 
-    it('tokenizes from column 0 and bounds tokenization on the right at endColumn', async () => {
+    it('emits only the tokens inside the requested [startColumn, endColumn) window', async () => {
       await setUp('aa = bb;', '(identifier) @variable');
 
-      // Tokenization always starts at column 0 (correct scope context, stable
-      // under horizontal scroll); endColumn=7 excludes the ';' at column 7.
-      const tokens = named(languageMode.getScreenLineTokens(0, 0, 7));
+      // Only columns 5..7 ("bb"): the leading identifier "aa" is outside the
+      // window and must not appear.
+      const tokens = named(languageMode.getScreenLineTokens(0, 5, 7));
       expect(tokens).toEqual([
-        { column: 0, text: 'aa', scopes: ['variable'] },
-        { column: 2, text: ' = ', scopes: [] },
         { column: 5, text: 'bb', scopes: ['variable'] }
       ]);
-      // Nothing is emitted at or past endColumn.
-      for (const t of tokens) {
-        expect(t.column + t.text.length).toBeLessThanOrEqual(7);
-      }
     });
 
-    it('carries an enclosing scope across the whole line', async () => {
-      // A template literal is one string node spanning the line; every token in
-      // the middle of it must carry the `string` scope.
+    it('carries scopes that enclose the window even when they open far to its left', async () => {
+      // The template literal is one string node spanning the whole line; a
+      // window in its middle must still carry the `string` scope. Tree-sitter
+      // gives us this via node intersection — no scan from column 0.
       await setUp('`aaaaaaaaaa bbbb`', '(template_string) @string');
 
-      const tokens = languageMode.getScreenLineTokens(0, 0, 12);
-      const mid = tokens.find(
-        (t) => t.column <= 6 && t.column + t.text.length > 6
-      );
-      expect(mid).toBeTruthy();
-      expect(mid.scopeIds.map((id) => languageMode.scopeNameForScopeId(id)))
-        .toContain('string');
+      const tokens = named(languageMode.getScreenLineTokens(0, 6, 10));
+      expect(tokens.length).toBe(1);
+      expect(tokens[0].column).toBe(6);
+      expect(tokens[0].text).toBe('aaaa');
+      expect(tokens[0].scopes).toContain('string');
     });
 
-    it('bounds a very long ("minified") line at endColumn instead of tokenizing it in full', async () => {
+    it('highlights a window of a very long ("minified") line, bounded to the window', async () => {
       // A single line well over LINE_LENGTH_LIMIT_FOR_HIGHLIGHTING (10000):
       // "a=" repeated 8000 times => 16000 characters, "=" at every odd column.
       const line = 'a='.repeat(8000);
       await setUp(line, '["="] @keyword');
 
-      const tokens = named(languageMode.getScreenLineTokens(0, 0, 12010));
+      const start = 12000;
+      const end = 12010;
+      const tokens = named(languageMode.getScreenLineTokens(0, start, end));
 
       // Real, scoped tokens are produced for the window...
       expect(tokens.length).toBeGreaterThan(0);
       expect(tokens.some((t) => t.scopes.includes('keyword'))).toBe(true);
 
-      // ...bounded to endColumn — the full 16000-character line is NOT tokenized.
+      // ...and every token lies inside the window: nothing before, nothing
+      // after — the 16000-character line is never tokenized in full.
       for (const t of tokens) {
-        expect(t.column + t.text.length).toBeLessThanOrEqual(12010);
+        expect(t.column).toBeGreaterThanOrEqual(start);
+        expect(t.column + t.text.length).toBeLessThanOrEqual(end);
       }
 
       // Contrast: the full-line highlight path skips this line entirely because

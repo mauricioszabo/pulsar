@@ -122,11 +122,12 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
     // folds still break the mapping, so defer to the base path when present.
     if (this._displayHasFolds(model)) return null;
 
-    // No syntax tree yet — let the base path render until the first parse lands.
-    if (!languageMode.rootLanguageLayer || !languageMode.rootLanguageLayer.tree) {
-      return null;
-    }
-
+    // NOTE: the token source is returned even before the first parse finishes.
+    // `getScreenLineTokens` returns null while the tree is missing and the line
+    // view renders plain windowed buffer text — we must NOT fall back to the
+    // display-layer render path for tree-sitter files, because building its
+    // screen-line index for a huge unwrapped file is exactly the open-time cost
+    // this component exists to avoid.
     this._ensureHighlightSubscription(languageMode);
     return languageMode;
   }
@@ -283,6 +284,11 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
     const disposables = [];
     if (typeof languageMode.onDidChangeHighlighting === 'function') {
       disposables.push(languageMode.onDidChangeHighlighting(bump));
+    }
+    // Fires when the initial parse lands — switches lines from the plain-text
+    // placeholder to real tokens.
+    if (typeof languageMode.onDidTokenize === 'function') {
+      disposables.push(languageMode.onDidTokenize(bump));
     }
     const buffer = languageMode.buffer;
     if (buffer && typeof buffer.onDidChange === 'function') {

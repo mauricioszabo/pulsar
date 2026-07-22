@@ -612,57 +612,99 @@ class WASMTreeSitterLanguageMode {
     const lineLength = this.buffer.lineLengthForRow(row);
     if (lineLength == null) return [];
 
-    // IMPORTANT: tokenization always starts at column 0, never at the visible
-    // start column. Seeking mid-line yields a different (wrong) open-scope
-    // context, which would make the highlighting depend on the horizontal
-    // scroll position. We bound the RIGHT edge by `endColumn` so a long line
-    // isn't tokenized in full; the caller renders only the columns it needs.
-    const clipEnd = Math.min(lineLength, endColumn);
-    if (clipEnd <= 0) return [];
+    const c1 = Math.max(0, Math.min(startColumn, lineLength));
+    const c2 = Math.min(lineLength, endColumn);
+    if (c1 >= c2) return [];
 
-    const windowText = this.buffer.getTextInRange(
-      new Range(new Point(row, 0), new Point(row, clipEnd))
+    const from = new Point(row, c1);
+    const to = new Point(row, c2);
+
+    // This deliberately does NOT go through the HighlightIterator/seek
+    // machinery. Each layer's `getSyntaxBoundaries(from, to)` runs the
+    // highlights query with `{ startPosition, endPosition }` — tree-sitter
+    // prunes the walk to nodes that INTERSECT the window, which includes any
+    // enclosing node that opened before it (that's how a window in the middle
+    // of a 100k-char line still gets the correct scope context without ever
+    // scanning from column 0). It returns [sortedBoundaries, alreadyOpenAtFrom].
+    //
+    // Layers: root plus any injection layers whose markers intersect the
+    // window, shallow to deep. (`coverShallowerScopes` refinement is not
+    // applied here yet.)
+    const layers = [this.rootLanguageLayer];
+    const markers = this.injectionsMarkerLayer.findMarkers({
+      intersectsRange: new Range(from, to)
+    });
+    for (const marker of markers) {
+      if (marker.languageLayer) layers.push(marker.languageLayer);
+    }
+    layers.sort((a, b) => a.depth - b.depth);
+
+    const initialScopeIds = [];
+    const events = [];
+    for (const layer of layers) {
+      if (!layer.tree || !layer.queries?.highlightsQuery) continue;
+      let boundaries, openScopes;
+      try {
+        [boundaries, openScopes] = layer.getSyntaxBoundaries(from, to);
+      } catch (e) {
+        continue;
+      }
+      if (openScopes) {
+        for (const scopes of openScopes.values()) {
+          initialScopeIds.push(...scopes);
+        }
+      }
+      let it = boundaries && boundaries.begin;
+      while (it && it.key) {
+        events.push({
+          column: it.key.position.column,
+          close: it.key.boundary === 'end',
+          scopeIds: it.value.scopeIds,
+          depth: layer.depth
+        });
+        it.next();
+      }
+    }
+
+    // Sort: by column; closes before opens at the same column; closes deepest
+    // layer first, opens shallowest first.
+    events.sort((a, b) =>
+      (a.column - b.column) ||
+      (a.close === b.close
+        ? (a.close ? b.depth - a.depth : a.depth - b.depth)
+        : (a.close ? -1 : 1))
     );
 
-    const iterator = this.buildHighlightIterator();
-    // `seek` returns the scopes already open at column 0 (usually just the
-    // language's base scope) and bounds the highlight query to `clipEnd`.
-    let scopeIds = (iterator.seek({ row, column: 0 }, row, clipEnd) || []).slice();
-
+    // Single pass: emit one token per maximal run with a constant scope set.
+    const windowText = this.buffer.getTextInRange(new Range(from, to));
     const tokens = [];
-    let column = 0;
-
-    while (true) {
-      const position = iterator.getPosition();
-      const boundaryColumn =
-        position.row > row ? clipEnd : Math.min(position.column, clipEnd);
-
-      if (boundaryColumn > column) {
+    let stack = initialScopeIds;
+    let col = c1;
+    for (const ev of events) {
+      const evCol = Math.max(c1, Math.min(ev.column, c2));
+      if (evCol > col) {
         tokens.push({
-          column,
-          text: windowText.substring(column, boundaryColumn),
-          scopeIds: scopeIds.slice()
+          column: col,
+          text: windowText.substring(col - c1, evCol - c1),
+          scopeIds: stack.slice()
         });
-        column = boundaryColumn;
+        col = evCol;
       }
-
-      if (position.row > row || position.column >= clipEnd) break;
-
-      // Apply the boundary: closing scopes act before opening scopes.
-      const closeCount = iterator.getCloseScopeIds().length;
-      for (let i = 0; i < closeCount; i++) scopeIds.pop();
-      scopeIds.push(...iterator.getOpenScopeIds());
-
-      if (!iterator.moveToSuccessor()) {
-        if (clipEnd > column) {
-          tokens.push({
-            column,
-            text: windowText.substring(column, clipEnd),
-            scopeIds: scopeIds.slice()
-          });
+      if (ev.close) {
+        for (const id of ev.scopeIds) {
+          const idx = stack.lastIndexOf(id);
+          if (idx !== -1) stack.splice(idx, 1);
         }
-        break;
+      } else {
+        stack.push(...ev.scopeIds);
       }
+    }
+    if (col < c2) {
+      tokens.push({
+        column: col,
+        text: windowText.substring(col - c1),
+        scopeIds: stack.slice()
+      });
     }
 
     return tokens;
@@ -2172,7 +2214,10 @@ class HighlightIterator {
     let { buffer, rootLanguageLayer } = this.languageMode;
     if (!rootLanguageLayer) { return []; }
 
-    if (!endRow) {
+    // NOTE: `endRow == null`, not `!endRow` — row 0 is a valid end row. The
+    // old falsy check made any `seek(start, 0)` silently highlight the entire
+    // buffer.
+    if (endRow == null) {
       // Creative consumers of `HighlightIterator` exist in the wild; some of
       // them expect the `TextMateHighlightIterator::seek` signature that needs
       // only a starting position.

@@ -324,26 +324,25 @@ class LinesView {
       }
       el._tsKey = tsKey;
       el._tsLineLength = item.lineLength;
-      const allTokens = tokenSource.getScreenLineTokens(item.row, from, to);
+      // Tokens are already bounded to [from, to] with correct enclosing scopes;
+      // the first token's column anchors the window via padding-left.
+      const tokens = tokenSource.getScreenLineTokens(item.row, from, to);
       let leftPad = 0;
       let html;
-      if (allTokens == null) {
-        // Tree not ready this frame; show plain windowed text so it isn't blank.
+      if (tokens == null) {
+        // Tree not parsed yet: plain buffer text for the visible window only.
         const buffer = tokenSource.buffer;
-        const end = Math.min(buffer ? (buffer.lineLengthForRow(item.row) || 0) : 0, to);
-        const text = buffer
-          ? buffer.getTextInRange([[item.row, 0], [item.row, end]])
+        const len = buffer ? (buffer.lineLengthForRow(item.row) || 0) : 0;
+        const winFrom = Math.min(from, len);
+        const winTo = Math.min(len, to);
+        const text = winFrom < winTo
+          ? buffer.getTextInRange([[item.row, winFrom], [item.row, winTo]])
           : '';
+        leftPad = text ? winFrom * (cw || 0) : 0;
         html = text ? escapeHtml(text) : NBSP;
       } else {
-        let i = 0;
-        while (i < allTokens.length &&
-               (allTokens[i].column + allTokens[i].text.length) <= from) {
-          i++;
-        }
-        const rendered = i > 0 ? allTokens.slice(i) : allTokens;
-        leftPad = (rendered.length > 0 ? rendered[0].column : 0) * cw;
-        html = buildTokensLineHtml(rendered, tokenSource, item.row);
+        leftPad = (tokens.length > 0 ? tokens[0].column : 0) * (cw || 0);
+        html = buildTokensLineHtml(tokens, tokenSource, item.row);
       }
       const style = cw
         ? heightStyle + 'padding-left: ' + leftPad + 'px; min-width: ' + (item.lineLength * cw) + 'px;'
