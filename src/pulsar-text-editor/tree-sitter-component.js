@@ -146,29 +146,7 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
     // screen-line index for a huge unwrapped file is exactly the open-time cost
     // this component exists to avoid.
     this._ensureHighlightSubscription(languageMode);
-    this._preferAsyncIndent(languageMode);
     return languageMode;
-  }
-
-  // Editing a big file was blocked ~190ms per keystroke by a SYNCHRONOUS
-  // reparse: auto-indent (`suggestedIndentForBufferRow`, fired on Enter and
-  // electric characters) calls `getOrParseTree()`, which runs the un-timed
-  // synchronous `parse()` to compute an accurate indent. Each transaction
-  // starts with a `transactionReparseBudgetMs` (10ms) during which the language
-  // mode prefers synchronous indentation — but a single parse of a large file
-  // far exceeds that, so the first indent of a transaction blocks.
-  //
-  // Highlighting itself is already incremental and async (a 3ms sync cap, then
-  // chunked). We only need indentation to stop forcing a blocking parse: set the
-  // budget to 0 so `shouldUseAsyncIndent()` is always true. Indentation is then
-  // computed off the async reparse and applied a frame later — a small, correct
-  // trade for not freezing the keystroke.
-  _preferAsyncIndent(languageMode) {
-    if (this._asyncIndentLanguageMode === languageMode) return;
-    if (typeof languageMode.transactionReparseBudgetMs !== 'number') return;
-    this._asyncIndentLanguageMode = languageMode;
-    languageMode.transactionReparseBudgetMs = 0;
-    languageMode.currentTransactionReparseBudgetMs = 0;
   }
 
   _displayHasFolds(model) {

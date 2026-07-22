@@ -904,8 +904,20 @@ class WASMTreeSitterLanguageMode {
     let devMode = atom.inDevMode();
     let parser = this.getOrCreateParserForLanguage(language);
     parser.reset();
-    parser.setTimeoutMicros(this.syncTimeoutMicros);
     PARSERS_IN_USE.add(parser);
+
+    // web-tree-sitter 0.25 made `setTimeoutMicros` a no-op (deprecated in favor
+    // of a parse progress callback). Without a working time limit, the
+    // "synchronous attempt" below would run the ENTIRE parse on the main thread
+    // and block the keystroke that triggered it (observed: ~140ms on a large
+    // file). Instead we time-slice with the progress callback: it returns
+    // `true` to cancel once a synchronous burst exceeds our budget, `parse`
+    // returns `null`, and — because we don't call `reset` between bursts — the
+    // next `parse` call resumes where it left off. Bursts are separated by
+    // `setImmediate`, so the UI stays responsive while a big parse completes.
+    const budgetMs = (this.syncTimeoutMicros ?? PARSE_JOB_LIMIT_MICROS) / 1000;
+    let sliceStart = performance.now();
+    const progressCallback = () => (performance.now() - sliceStart) >= budgetMs;
 
     // When you edit a tree, the positions of nodes in the tree are adjusted
     // accordingly. But if you had passed a string into `parse`, all those
@@ -952,41 +964,39 @@ class WASMTreeSitterLanguageMode {
           console.log(`(async: ${batchCount} batches)`);
         }
       }
-      parser.setTimeoutMicros(null);
       PARSERS_IN_USE.delete(parser);
     };
 
     if (devMode && tag) { console.time(tag); }
 
-    try {
-      // Attempt a synchronous parse.
-      tree = parser.parse(callback, oldTree, { includedRanges });
-    } catch (err) {
-      if (!isParseTimeout(err)) { throw err; }
-
-      // The parse couldn't be completed in the allotted time, so we'll go
-      // async and return a promise.
-      return new Promise((resolve, reject) => {
-        const parseJob = () => {
-          try {
-            batchCount++;
-            tree = parser.parse(callback, oldTree, { includedRanges });
-          } catch (err) {
-            if (!isParseTimeout(err)) { return reject(err); }
-            setImmediate(parseJob);
-            return;
-          }
-
-          cleanup();
-          resolve(tree);
-        };
-        setImmediate(parseJob);
-      });
+    // First synchronous burst (budget-limited by the progress callback).
+    tree = parser.parse(callback, oldTree, { includedRanges, progressCallback });
+    if (tree !== null) {
+      // Completed within one burst.
+      cleanup();
+      return tree;
     }
 
-    // If we get this far, the synchronous parse was a success.
-    cleanup();
-    return tree;
+    // The parse was cancelled after exceeding the burst budget. Resume it
+    // asynchronously, one burst per event-loop turn, until it completes.
+    return new Promise((resolve, reject) => {
+      const parseJob = () => {
+        sliceStart = performance.now();
+        try {
+          batchCount++;
+          tree = parser.parse(callback, oldTree, { includedRanges, progressCallback });
+        } catch (err) {
+          return reject(err);
+        }
+        if (tree === null) {
+          setImmediate(parseJob);
+          return;
+        }
+        cleanup();
+        resolve(tree);
+      };
+      setImmediate(parseJob);
+    });
   }
 
   parse(language, oldTree, includedRanges, { tag = null } = {}) {
