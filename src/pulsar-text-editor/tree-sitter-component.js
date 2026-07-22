@@ -42,6 +42,10 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
   constructor(props) {
     super(props);
     this._maxLineLengthSeen = 0;
+    // Bumped whenever the buffer changes or highlighting is recomputed; lets
+    // LinesView skip re-tokenizing (re-`seek`ing) rows on renders that only move
+    // the cursor/selection.
+    this._tokenGeneration = 0;
     // Force no-wrap before the first render for tree-sitter files so the model's
     // display layer (used by cursor/editing) never chunks the file at 500 cols.
     if (this._isTreeSitterGrammar(this._languageModeFor(this.props.model))) {
@@ -218,7 +222,7 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
       sortedBlocks: [], topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      tokenSource,
+      tokenSource, tokenGeneration: this._tokenGeneration,
     });
 
     this._gutterView.update({
@@ -264,18 +268,29 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
 
   // --- highlight refresh ----------------------------------------------------
 
-  // A highlight change happens asynchronously after a tree-sitter reparse; make
-  // sure it schedules a re-render so the swapped-in tokens refresh.
+  // Invalidate the token cache and re-render when the buffer changes or when
+  // highlighting is recomputed (the latter happens asynchronously after a
+  // tree-sitter reparse).
   _ensureHighlightSubscription(languageMode) {
     if (this._highlightLanguageMode === languageMode) return;
     this._disposeHighlightSubscription();
+    this._highlightLanguageMode = languageMode;
 
+    const bump = () => {
+      this._tokenGeneration++;
+      if (this._scheduleUpdate) this._scheduleUpdate();
+    };
+    const disposables = [];
     if (typeof languageMode.onDidChangeHighlighting === 'function') {
-      this._highlightLanguageMode = languageMode;
-      this._highlightSubscription = languageMode.onDidChangeHighlighting(() => {
-        if (this._scheduleUpdate) this._scheduleUpdate();
-      });
+      disposables.push(languageMode.onDidChangeHighlighting(bump));
     }
+    const buffer = languageMode.buffer;
+    if (buffer && typeof buffer.onDidChange === 'function') {
+      disposables.push(buffer.onDidChange(bump));
+    }
+    this._highlightSubscription = {
+      dispose() { for (const d of disposables) d.dispose(); }
+    };
   }
 
   _disposeHighlightSubscription() {

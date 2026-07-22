@@ -124,7 +124,7 @@ class LinesView {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      tokenSource,
+      tokenSource, tokenGeneration,
     } = state;
 
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
@@ -214,7 +214,7 @@ class LinesView {
       for (const b of this._blocksAtRow(row, 'before', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
-      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource }));
+      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenGeneration }));
       for (const b of this._blocksAtRow(row, 'after', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
@@ -288,7 +288,7 @@ class LinesView {
     if (blockInfo.wrapperElement === el) blockInfo.wrapperElement = null;
   }
 
-  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource }) {
+  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenGeneration }) {
     let el = this._lineEls.get(item.row);
     if (!el) {
       el = document.createElement('div');
@@ -303,10 +303,57 @@ class LinesView {
     // data-screen-row.
     if (el.dataset.screenRow !== String(item.row)) el.dataset.screenRow = item.row;
 
-    // Style.
     const lh = lineHeight;
     const cw = charWidth;
     const heightStyle = lh ? 'height: ' + lh + 'px; overflow: hidden; ' : '';
+
+    // Tree-sitter-optimized path: one <span> per token. Scopes are computed
+    // from column 0 (so highlighting is stable regardless of horizontal scroll),
+    // but we emit only the tokens that reach into the visible window and offset
+    // the first with padding-left so columns line up under horizontal scroll.
+    // (Non-incremental for now; M4 will cache/repaint by change.)
+    if (item.mode === 'tokens') {
+      const from = visColRange ? Math.max(0, visColRange[0]) : 0;
+      const to = visColRange ? visColRange[1] : Infinity;
+      // Skip re-tokenizing (re-`seek`ing) when neither the content/highlighting
+      // (tokenGeneration) nor the visible window changed since this row was last
+      // built — e.g. renders triggered only by cursor/selection movement.
+      const tsKey = tokenGeneration + '|' + from + '|' + to;
+      if (el._tsKey === tsKey && el._tsLineLength === item.lineLength) {
+        return el;
+      }
+      el._tsKey = tsKey;
+      el._tsLineLength = item.lineLength;
+      const allTokens = tokenSource.getScreenLineTokens(item.row, from, to);
+      let leftPad = 0;
+      let html;
+      if (allTokens == null) {
+        // Tree not ready this frame; show plain windowed text so it isn't blank.
+        const buffer = tokenSource.buffer;
+        const end = Math.min(buffer ? (buffer.lineLengthForRow(item.row) || 0) : 0, to);
+        const text = buffer
+          ? buffer.getTextInRange([[item.row, 0], [item.row, end]])
+          : '';
+        html = text ? escapeHtml(text) : NBSP;
+      } else {
+        let i = 0;
+        while (i < allTokens.length &&
+               (allTokens[i].column + allTokens[i].text.length) <= from) {
+          i++;
+        }
+        const rendered = i > 0 ? allTokens.slice(i) : allTokens;
+        leftPad = (rendered.length > 0 ? rendered[0].column : 0) * cw;
+        html = buildTokensLineHtml(rendered, tokenSource, item.row);
+      }
+      const style = cw
+        ? heightStyle + 'padding-left: ' + leftPad + 'px; min-width: ' + (item.lineLength * cw) + 'px;'
+        : heightStyle;
+      if (el.style.cssText !== style) el.style.cssText = style;
+      if (el.innerHTML !== html) el.innerHTML = html;
+      return el;
+    }
+
+    // Style (non-token modes).
     let style;
     if (!cw) {
       style = heightStyle;
@@ -319,24 +366,6 @@ class LinesView {
         'min-width: ' + (item.lineLength * cw) + 'px;';
     }
     if (el.style.cssText !== style) el.style.cssText = style;
-
-    // Tree-sitter-optimized path: rebuild token spans from the windowed
-    // tokenizer every render (non-incremental; M4 will cache/repaint by change).
-    if (item.mode === 'tokens') {
-      const from = visColRange ? Math.max(0, visColRange[0]) : 0;
-      const to = visColRange ? visColRange[1] : Infinity;
-      const tokens = tokenSource.getScreenLineTokens(item.row, from, to);
-      if (tokens == null) {
-        // Tree not ready this frame; fall back to plain buffer text so the
-        // line isn't blank.
-        const buffer = tokenSource.buffer;
-        const text = buffer ? buffer.lineForRow(item.row) : '';
-        el.innerHTML = buildPlainLineHtml(text, visColRange);
-      } else {
-        el.innerHTML = buildTokensLineHtml(tokens, tokenSource, item.row);
-      }
-      return el;
-    }
 
     // HTML — only update if the content actually changed.
     // For 'short' lines the key is the cached screenLine object; for

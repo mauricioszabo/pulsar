@@ -612,26 +612,25 @@ class WASMTreeSitterLanguageMode {
     const lineLength = this.buffer.lineLengthForRow(row);
     if (lineLength == null) return [];
 
-    const clipStart = Math.max(0, startColumn);
+    // IMPORTANT: tokenization always starts at column 0, never at the visible
+    // start column. Seeking mid-line yields a different (wrong) open-scope
+    // context, which would make the highlighting depend on the horizontal
+    // scroll position. We bound the RIGHT edge by `endColumn` so a long line
+    // isn't tokenized in full; the caller renders only the columns it needs.
     const clipEnd = Math.min(lineLength, endColumn);
-    if (clipStart >= clipEnd) return [];
+    if (clipEnd <= 0) return [];
 
-    // Read ONLY the visible window from the buffer — never materialize the whole
-    // (possibly 100k+ character) line. `windowText[i]` is column `clipStart + i`.
     const windowText = this.buffer.getTextInRange(
-      new Range(new Point(row, clipStart), new Point(row, clipEnd))
+      new Range(new Point(row, 0), new Point(row, clipEnd))
     );
-    const textAt = (from, to) =>
-      windowText.substring(from - clipStart, to - clipStart);
 
     const iterator = this.buildHighlightIterator();
-    // `seek` returns the scopes already open at the window start; that's our
-    // initial active-scope stack. It also bounds the highlight query to
-    // `clipEnd` (the third argument) so long lines aren't tokenized in full.
-    let scopeIds = (iterator.seek({ row, column: clipStart }, row, clipEnd) || []).slice();
+    // `seek` returns the scopes already open at column 0 (usually just the
+    // language's base scope) and bounds the highlight query to `clipEnd`.
+    let scopeIds = (iterator.seek({ row, column: 0 }, row, clipEnd) || []).slice();
 
     const tokens = [];
-    let column = clipStart;
+    let column = 0;
 
     while (true) {
       const position = iterator.getPosition();
@@ -641,7 +640,7 @@ class WASMTreeSitterLanguageMode {
       if (boundaryColumn > column) {
         tokens.push({
           column,
-          text: textAt(column, boundaryColumn),
+          text: windowText.substring(column, boundaryColumn),
           scopeIds: scopeIds.slice()
         });
         column = boundaryColumn;
@@ -658,7 +657,7 @@ class WASMTreeSitterLanguageMode {
         if (clipEnd > column) {
           tokens.push({
             column,
-            text: textAt(column, clipEnd),
+            text: windowText.substring(column, clipEnd),
             scopeIds: scopeIds.slice()
           });
         }
