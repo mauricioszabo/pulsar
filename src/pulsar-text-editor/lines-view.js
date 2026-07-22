@@ -141,7 +141,11 @@ class LinesView {
 
     // Compute visible screen line wrappers (with caching, same as Solid).
     const buffer = model.getBuffer ? model.getBuffer() : model.buffer;
-    const canUsePlain = this._supportsPlainText(model, buffer, displayLayer);
+    // The tree-sitter path renders every row from tokens and has no display
+    // layer, so the plain-text long-line fallback (which needs one) is skipped.
+    const canUsePlain = tokenSource
+      ? false
+      : this._supportsPlainText(model, buffer, displayLayer);
     const visibleItems = [];
 
     for (let r = firstRow; r <= lastRow; r++) {
@@ -239,6 +243,7 @@ class LinesView {
 
   _supportsPlainText(model, buffer, displayLayer) {
     if (!buffer) return false;
+    if (!displayLayer) return false;
     if (model.isSoftWrapped && model.isSoftWrapped()) return false;
     const folds = displayLayer.foldsMarkerLayer;
     if (folds && folds.getMarkerCount && folds.getMarkerCount() > 0) return false;
