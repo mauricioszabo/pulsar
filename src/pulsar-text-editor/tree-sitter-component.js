@@ -38,14 +38,31 @@ const { OVERSCAN, computeVisibleColumnRange } = require('./viewport');
 // bitwise/`| 0` handling in the display layer (which would wrap at column 0).
 const NO_WRAP_COLUMN = 0x40000000;
 
+// A dirtied row range wider than this escalates to a full (structural) cache
+// invalidation instead of bumping each row's version — cheaper than touching
+// thousands of Map entries for a whole-file re-highlight, and only visible rows
+// re-tokenize anyway.
+const DIRTY_RANGE_ESCALATION = 500;
+
 class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
   constructor(props) {
     super(props);
     this._maxLineLengthSeen = 0;
-    // Bumped whenever the buffer changes or highlighting is recomputed; lets
-    // LinesView skip re-tokenizing (re-`seek`ing) rows on renders that only move
-    // the cursor/selection.
-    this._tokenGeneration = 0;
+
+    // M4 incremental repaint. Between renders we accumulate which rows changed;
+    // LinesView re-tokenizes only those rows and repaints only the token spans
+    // that actually differ. A row is dirty when:
+    //   - `_dirtyRows` contains it (a same-line edit or a bounded highlight
+    //     change touched it), or
+    //   - it is at/after `_dirtyFromRow` (an edit changed the line count, so
+    //     every row below it shifted), or
+    //   - `_fullDirty` is set (initial parse — the whole file gained tokens).
+    // Renders caused only by cursor/selection movement dirty nothing, so no row
+    // re-tokenizes.
+    this._dirtyRows = new Set();
+    this._dirtyFromRow = Infinity;
+    this._fullDirty = false;
+    this._lastLineCount = null;
     // Force no-wrap before the first render for tree-sitter files so the model's
     // display layer (used by cursor/editing) never chunks the file at 500 cols.
     if (this._isTreeSitterGrammar(this._languageModeFor(this.props.model))) {
@@ -223,7 +240,7 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
       sortedBlocks: [], topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      tokenSource, tokenGeneration: this._tokenGeneration,
+      tokenSource, tokenDirty: this._consumeTokenDirty(),
     });
 
     this._gutterView.update({
@@ -267,33 +284,98 @@ class PulsarTreeSitterTextEditorComponent extends PulsarTextEditorComponent {
     }));
   }
 
-  // --- highlight refresh ----------------------------------------------------
+  // --- M4 incremental invalidation ------------------------------------------
 
-  // Invalidate the token cache and re-render when the buffer changes or when
-  // highlighting is recomputed (the latter happens asynchronously after a
-  // tree-sitter reparse).
+  // Dirty specific rows: a same-line edit or a bounded highlight change. A range
+  // wide enough that tracking each row isn't worthwhile escalates to "dirty from
+  // this row down" (only the visible portion re-tokenizes anyway).
+  _markRowsDirty(startRow, endRow) {
+    if (endRow - startRow > DIRTY_RANGE_ESCALATION) {
+      this._dirtyFromRow = Math.min(this._dirtyFromRow, startRow);
+      return;
+    }
+    for (let r = startRow; r <= endRow; r++) this._dirtyRows.add(r);
+  }
+
+  // Snapshot the accumulated dirty state for one render, then reset it.
+  _consumeTokenDirty() {
+    const dirty = {
+      full: this._fullDirty,
+      fromRow: this._dirtyFromRow,
+      rows: this._dirtyRows
+    };
+    this._fullDirty = false;
+    this._dirtyFromRow = Infinity;
+    this._dirtyRows = new Set();
+    return dirty;
+  }
+
+  _onBufferChange(event) {
+    const buffer = this._languageModeFor(this.props.model)?.buffer ||
+      (this.props.model.getBuffer && this.props.model.getBuffer());
+    const lineCount = buffer ? buffer.getLineCount() : null;
+
+    // A change in line count shifts every row below the edit: the DOM element
+    // keyed by a given row number now maps to different content, so those rows
+    // must re-tokenize.
+    const structural = lineCount !== this._lastLineCount;
+    this._lastLineCount = lineCount;
+
+    const changes = event && event.changes
+      ? event.changes
+      : (event && event.newRange ? [event] : []);
+    if (changes.length === 0 && structural) {
+      this._dirtyFromRow = 0;
+    }
+    for (const change of changes) {
+      const range = change.newRange || change.range;
+      if (!range || !range.start) {
+        this._fullDirty = true;
+      } else if (structural) {
+        this._dirtyFromRow = Math.min(this._dirtyFromRow, range.start.row);
+      } else {
+        this._markRowsDirty(range.start.row, range.end.row);
+      }
+    }
+    if (this._scheduleUpdate) this._scheduleUpdate();
+  }
+
+  // Invalidate token caches and re-render when the buffer changes, when the
+  // initial parse lands, or when highlighting is recomputed after a reparse
+  // (the last happens asynchronously).
   _ensureHighlightSubscription(languageMode) {
     if (this._highlightLanguageMode === languageMode) return;
     this._disposeHighlightSubscription();
     this._highlightLanguageMode = languageMode;
 
-    const bump = () => {
-      this._tokenGeneration++;
-      if (this._scheduleUpdate) this._scheduleUpdate();
-    };
     const disposables = [];
+
     if (typeof languageMode.onDidChangeHighlighting === 'function') {
-      disposables.push(languageMode.onDidChangeHighlighting(bump));
+      disposables.push(languageMode.onDidChangeHighlighting((range) => {
+        if (range && range.start) {
+          this._markRowsDirty(range.start.row, range.end.row);
+        } else {
+          this._fullDirty = true;
+        }
+        if (this._scheduleUpdate) this._scheduleUpdate();
+      }));
     }
+
     // Fires when the initial parse lands — switches lines from the plain-text
-    // placeholder to real tokens.
+    // placeholder to real tokens across the whole file.
     if (typeof languageMode.onDidTokenize === 'function') {
-      disposables.push(languageMode.onDidTokenize(bump));
+      disposables.push(languageMode.onDidTokenize(() => {
+        this._fullDirty = true;
+        if (this._scheduleUpdate) this._scheduleUpdate();
+      }));
     }
+
     const buffer = languageMode.buffer;
     if (buffer && typeof buffer.onDidChange === 'function') {
-      disposables.push(buffer.onDidChange(bump));
+      if (this._lastLineCount == null) this._lastLineCount = buffer.getLineCount();
+      disposables.push(buffer.onDidChange((event) => this._onBufferChange(event)));
     }
+
     this._highlightSubscription = {
       dispose() { for (const d of disposables) d.dispose(); }
     };

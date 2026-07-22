@@ -5,6 +5,11 @@ const { LONG_LINE_THRESHOLD, PLAIN_TEXT_THRESHOLD } = require('./viewport');
 
 const NBSP = ' ';
 
+const EMPTY_IDS = [];
+// Reused scratch element for parsing a single token's HTML into a DOM node.
+const TOKEN_SCRATCH =
+  typeof document !== 'undefined' ? document.createElement('div') : null;
+
 function escapeHtml(s) {
   return s
     .replace(/&/g, '&amp;')
@@ -47,64 +52,135 @@ function buildPlainLineHtml(text, visibleColumnRange) {
   return escapeHtml(text);
 }
 
-// Tree-sitter-optimized path (ADR 006, milestone M3): build a line's HTML from
-// flat tokens produced by `languageMode.getScreenLineTokens`.
+// Tree-sitter-optimized path (ADR 006, milestones M3/M4): each token is a
+// SELF-CONTAINED span subtree that is a direct child of the line element:
 //
-// Scope spans are NESTED, exactly like the legacy renderer: one <span> per open
-// scope, with only that scope's `syntax--…` classes on it. That is what theme
-// CSS is written against — flattening the whole scope stack onto one class
-// attribute makes selectors like `.syntax--function` match a token (e.g. a
-// comma) that is merely *inside* a function, coloring it wrongly.
+//   <span data-ts-row=R data-ts-col=C class="scopeA">   ← outer scope
+//     <span data-ts-row=R data-ts-col=C class="scopeB"> ← inner scope
+//       <span data-ts-row=R data-ts-col=C>text</span>   ← class-less leaf
+//     </span>
+//   </span>
 //
-// Each token's text sits in its own class-less leaf <span> carrying
-// `data-ts-row`/`data-ts-col` (the invalidation handle); it inherits its color
-// from the enclosing scope spans. Scope spans carry the same data attributes,
-// stamped with the position at which they open in this rendered line, so a
-// selector like `[data-ts-row="9"][data-ts-col="0"]` finds BOTH the scope
-// span(s) and the leaf span that start there — deleting the `(` that opened a
-// scope invalidates the pair in one query. Consecutive tokens sharing a scope
-// prefix share the ancestor spans — spans open/close only where the scope
-// stack actually changes.
+// Why nested (not one flat class list): theme CSS is written against Atom's
+// nested structure — flattening every scope onto one class attribute makes
+// selectors like `.syntax--function` match a token (e.g. a comma) merely
+// *inside* a function and color it wrongly.
+//
+// Why self-contained per token (not scope spans shared across tokens): it makes
+// each token an independently replaceable DOM node keyed by `data-ts-row`/
+// `data-ts-col`, so an edit repaints only the token spans that actually changed
+// (see `reconcileTokenDom`) instead of the whole line. Every span in a token's
+// subtree carries that token's row/col, so `[data-ts-row][data-ts-col]` finds
+// the whole token.
+function buildTokenHtml(token, languageMode, row) {
+  const attrs = ' data-ts-row="' + row + '" data-ts-col="' + token.column + '"';
+  const ids = token.scopeIds || [];
+  let open = '';
+  let close = '';
+  for (const id of ids) {
+    const cls = languageMode.classNameForScopeId(id);
+    open += '<span' + attrs + (cls ? ' class="' + escapeHtml(cls) + '"' : '') + '>';
+    close = '</span>' + close;
+  }
+  return open + '<span' + attrs + '>' + escapeHtml(token.text) + '</span>' + close;
+}
+
 function buildTokensLineHtml(tokens, languageMode, row) {
   if (!tokens || tokens.length === 0) return NBSP;
   let html = '';
   let hasText = false;
-  const openIds = [];
   for (const token of tokens) {
     if (!token.text) continue;
     hasText = true;
-    const ids = token.scopeIds || [];
-
-    // Keep the shared prefix of already-open scope spans; close the rest.
-    let common = 0;
-    while (
-      common < openIds.length &&
-      common < ids.length &&
-      openIds[common] === ids[common]
-    ) {
-      common++;
-    }
-    for (let i = openIds.length - 1; i >= common; i--) html += '</span>';
-    openIds.length = common;
-
-    // Open the scopes new to this token, stamped with the position at which
-    // they open in this rendered line.
-    for (let i = common; i < ids.length; i++) {
-      const cls = languageMode.classNameForScopeId(ids[i]);
-      html +=
-        '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '"' +
-        (cls ? ' class="' + escapeHtml(cls) + '"' : '') +
-        '>';
-      openIds.push(ids[i]);
-    }
-
-    html +=
-      '<span data-ts-row="' + row + '" data-ts-col="' + token.column + '">' +
-      escapeHtml(token.text) +
-      '</span>';
+    html += buildTokenHtml(token, languageMode, row);
   }
-  for (let i = 0; i < openIds.length; i++) html += '</span>';
   return hasText ? html : NBSP;
+}
+
+function scopeIdsEqual(a, b) {
+  a = a || EMPTY_IDS;
+  b = b || EMPTY_IDS;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// Two tokens render to the same subtree (ignoring position) when their text and
+// scope stack match. Position differences are patched cheaply via `data-ts-col`.
+function tokenContentEqual(a, b) {
+  return a.text === b.text && scopeIdsEqual(a.scopeIds, b.scopeIds);
+}
+
+function setTokenColumn(node, column) {
+  if (!node || node.nodeType !== 1) return;
+  const c = String(column);
+  if (node.getAttribute('data-ts-col') !== c) node.setAttribute('data-ts-col', c);
+  const inner = node.querySelectorAll('[data-ts-col]');
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i].getAttribute('data-ts-col') !== c) inner[i].setAttribute('data-ts-col', c);
+  }
+}
+
+function buildTokenNode(token, languageMode, row) {
+  TOKEN_SCRATCH.innerHTML = buildTokenHtml(token, languageMode, row);
+  return TOKEN_SCRATCH.firstChild;
+}
+
+// Pure diff: given the currently-rendered token list and the new one, return
+// the common-prefix length `p` and common-suffix length `s` (matched by content,
+// ignoring column). Tokens [0,p) and the last `s` are content-identical to what
+// is already in the DOM; tokens in the middle [p, len-s) differ and must be
+// rebuilt. Kept separate from the DOM work so it can be unit-tested.
+function planTokenReconcile(oldTokens, newTokens) {
+  const oldLen = oldTokens.length;
+  const newLen = newTokens.length;
+  let p = 0;
+  while (p < oldLen && p < newLen && tokenContentEqual(oldTokens[p], newTokens[p])) p++;
+  let s = 0;
+  while (
+    s < (oldLen - p) && s < (newLen - p) &&
+    tokenContentEqual(oldTokens[oldLen - 1 - s], newTokens[newLen - 1 - s])
+  ) s++;
+  return { p, s, oldLen, newLen };
+}
+
+// Mutate `el`'s children in place so they match `newTokens`, touching only the
+// token subtrees that actually changed. `oldTokens` is what `el` currently
+// renders (one child per token, in order). Unchanged tokens keep their exact
+// DOM nodes; tokens that only shifted column get a `data-ts-col` update; only
+// genuinely different tokens are rebuilt.
+function reconcileTokenDom(el, oldTokens, newTokens, languageMode, row) {
+  const kids = [];
+  for (let n = el.firstChild; n; n = n.nextSibling) kids.push(n);
+  // If the DOM child count doesn't match the cached token list, our assumptions
+  // are off — rebuild wholesale rather than corrupt the line.
+  if (kids.length !== oldTokens.length) {
+    el.innerHTML = buildTokensLineHtml(newTokens, languageMode, row);
+    return;
+  }
+
+  const { p, s, oldLen, newLen } = planTokenReconcile(oldTokens, newTokens);
+
+  // Prefix/suffix content matched — only positions may have shifted.
+  for (let i = 0; i < p; i++) {
+    if (oldTokens[i].column !== newTokens[i].column) setTokenColumn(kids[i], newTokens[i].column);
+  }
+  for (let k = 0; k < s; k++) {
+    const oldIdx = oldLen - 1 - k;
+    const newCol = newTokens[newLen - 1 - k].column;
+    if (oldTokens[oldIdx].column !== newCol) setTokenColumn(kids[oldIdx], newCol);
+  }
+
+  // Replace the differing middle [p, len-s) — the only spans repainted.
+  const refNode = (oldLen - s < oldLen) ? kids[oldLen - s] : null;
+  for (let i = p; i < oldLen - s; i++) el.removeChild(kids[i]);
+  if (newLen - s > p) {
+    const frag = document.createDocumentFragment();
+    for (let i = p; i < newLen - s; i++) {
+      frag.appendChild(buildTokenNode(newTokens[i], languageMode, row));
+    }
+    el.insertBefore(frag, refNode);
+  }
 }
 
 const LINE_CACHE_SLACK = 200;
@@ -157,7 +233,7 @@ class LinesView {
       sortedBlocks, topSpacer, bottomSpacer,
       charWidth, lineHeight, visColRange,
       cursorRows, placeholderText, longestLineWidth,
-      tokenSource, tokenGeneration,
+      tokenSource, tokenDirty,
     } = state;
 
     if (!model || (model.isDestroyed && model.isDestroyed())) return;
@@ -247,7 +323,7 @@ class LinesView {
       for (const b of this._blocksAtRow(row, 'before', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
-      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenGeneration }));
+      newEls.push(this._getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenDirty }));
       for (const b of this._blocksAtRow(row, 'after', sortedBlocks)) {
         newEls.push(this._getOrUpdateBlockEl(b));
       }
@@ -321,7 +397,7 @@ class LinesView {
     if (blockInfo.wrapperElement === el) blockInfo.wrapperElement = null;
   }
 
-  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenGeneration }) {
+  _getOrUpdateLineEl(item, { charWidth, lineHeight, visColRange, displayLayer, cursorRows, tokenSource, tokenDirty }) {
     let el = this._lineEls.get(item.row);
     if (!el) {
       el = document.createElement('div');
@@ -340,29 +416,31 @@ class LinesView {
     const cw = charWidth;
     const heightStyle = lh ? 'height: ' + lh + 'px; overflow: hidden; ' : '';
 
-    // Tree-sitter-optimized path: one <span> per token. Scopes are computed
-    // from column 0 (so highlighting is stable regardless of horizontal scroll),
-    // but we emit only the tokens that reach into the visible window and offset
-    // the first with padding-left so columns line up under horizontal scroll.
-    // (Non-incremental for now; M4 will cache/repaint by change.)
+    // Tree-sitter-optimized path (M3 render + M4 incremental repaint).
+    // Each token is a self-contained span subtree. Scopes are computed from
+    // column 0 so highlighting is stable under horizontal scroll; only the
+    // tokens reaching the visible window are emitted, offset with padding-left.
     if (item.mode === 'tokens') {
       const from = visColRange ? Math.max(0, visColRange[0]) : 0;
       const to = visColRange ? visColRange[1] : Infinity;
-      // Skip re-tokenizing (re-`seek`ing) when neither the content/highlighting
-      // (tokenGeneration) nor the visible window changed since this row was last
-      // built — e.g. renders triggered only by cursor/selection movement.
-      const tsKey = tokenGeneration + '|' + from + '|' + to;
-      if (el._tsKey === tsKey && el._tsLineLength === item.lineLength) {
+
+      const windowChanged = el._tsFrom !== from || el._tsTo !== to;
+      const rowDirty = !tokenDirty ||
+        tokenDirty.full ||
+        item.row >= tokenDirty.fromRow ||
+        (tokenDirty.rows && tokenDirty.rows.has(item.row));
+
+      // Nothing about this row changed and the visible window is the same — the
+      // existing spans are still correct, so don't touch the DOM (this is the
+      // common case: renders caused only by cursor/selection movement).
+      if (el._tokens != null && !windowChanged && !rowDirty) {
         return el;
       }
-      el._tsKey = tsKey;
-      el._tsLineLength = item.lineLength;
-      // Tokens are already bounded to [from, to] with correct enclosing scopes;
-      // the first token's column anchors the window via padding-left.
-      const tokens = tokenSource.getScreenLineTokens(item.row, from, to);
+
+      const newTokens = tokenSource.getScreenLineTokens(item.row, from, to);
+
       let leftPad = 0;
-      let html;
-      if (tokens == null) {
+      if (newTokens == null) {
         // Tree not parsed yet: plain buffer text for the visible window only.
         const buffer = tokenSource.buffer;
         const len = buffer ? (buffer.lineLengthForRow(item.row) || 0) : 0;
@@ -372,16 +450,27 @@ class LinesView {
           ? buffer.getTextInRange([[item.row, winFrom], [item.row, winTo]])
           : '';
         leftPad = text ? winFrom * (cw || 0) : 0;
-        html = text ? escapeHtml(text) : NBSP;
+        const html = text ? escapeHtml(text) : NBSP;
+        if (el.innerHTML !== html) el.innerHTML = html;
+        el._tokens = null;
       } else {
-        leftPad = (tokens.length > 0 ? tokens[0].column : 0) * (cw || 0);
-        html = buildTokensLineHtml(tokens, tokenSource, item.row);
+        leftPad = (newTokens.length > 0 ? newTokens[0].column : 0) * (cw || 0);
+        if (el._tokens == null || windowChanged) {
+          // First paint for this row (or the window moved): build all spans.
+          el.innerHTML = buildTokensLineHtml(newTokens, tokenSource, item.row);
+        } else {
+          // Incremental: repaint only the token spans that actually changed.
+          reconcileTokenDom(el, el._tokens, newTokens, tokenSource, item.row);
+        }
+        el._tokens = newTokens;
       }
+
+      el._tsFrom = from;
+      el._tsTo = to;
       const style = cw
         ? heightStyle + 'padding-left: ' + leftPad + 'px; min-width: ' + (item.lineLength * cw) + 'px;'
         : heightStyle;
       if (el.style.cssText !== style) el.style.cssText = style;
-      if (el.innerHTML !== html) el.innerHTML = html;
       return el;
     }
 
@@ -478,3 +567,8 @@ class LinesView {
 }
 
 module.exports = LinesView;
+// Exposed for unit tests of the incremental-repaint diff.
+module.exports._test = {
+  planTokenReconcile, tokenContentEqual, buildTokenHtml,
+  buildTokensLineHtml, reconcileTokenDom
+};
