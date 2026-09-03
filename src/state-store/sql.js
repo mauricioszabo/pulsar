@@ -2,10 +2,11 @@
 
 const path = require('path');
 const nativeSQLite = require(path.join(
+  // FIXME: this location might not be right
   require.resolve('better-sqlite3'),
   '..', '..',
-  'build', 'Release',
-  'better_sqlite3.node'
+  'prebuilds',
+  'linux-x64.node'
 ));
 const sqlite3 = require('better-sqlite3');
 
