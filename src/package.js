@@ -1300,22 +1300,17 @@ module.exports = class Package {
   }
 
   runRebuildProcess(done) {
-    let stderr = '';
-    let stdout = '';
-    return new BufferedProcess({
-      command: this.packageManager.getApmPath(),
-      args: ['rebuild', '--no-color'],
-      options: { cwd: this.path },
-      stderr(output) {
-        stderr += output;
-      },
-      stdout(output) {
-        stdout += output;
-      },
-      exit(code) {
-        done({ code, stdout, stderr });
-      }
-    });
+    // Used to spawn `ppm rebuild` as a child process. Now we route the
+    // request through the main-process IPC handler, which runs the
+    // package manager in-process — same behavior, no separate Node.
+    const { ipcRenderer } = require('electron');
+    ipcRenderer
+      .invoke('package-manager:run', { args: ['rebuild', '--no-color'], opts: { cwd: this.path } })
+      .then(
+        ({ code, stdout, stderr }) => done({ code, stdout, stderr }),
+        (error) => done({ code: 1, stdout: '', stderr: String(error?.stack || error?.message || error) })
+      );
+    return { kill() {}, onWillThrowError() { return { dispose() {} }; } };
   }
 
   getBuildFailureOutputStorageKey() {

@@ -136,6 +136,34 @@ ipcMain.handle('setAsDefaultProtocolClient', (_, { protocol, path, args }) => {
   return app.setAsDefaultProtocolClient(protocol, path, args);
 });
 
+// In-process package-manager handler. Settings View and other renderer-side
+// callers used to spawn the `ppm` binary via `BufferedProcess`; now they
+// invoke `runCommand(args, opts)` here and get the captured stdout/stderr
+// back through the IPC reply. See `src/ppm/index.js`.
+//
+// The caller may pass an `id` so we can stream each stdout/stderr chunk
+// back through the `package-manager:progress` channel as it arrives,
+// instead of waiting for the whole (potentially long-running) install
+// to finish. The final aggregated result is still returned via the
+// `invoke` reply for callers that just want the buffered output.
+ipcMain.handle('package-manager:run', async (event, { id, args, opts }) => {
+  const callOpts = { ...(opts ?? {}) };
+  if (id != null && !event.sender.isDestroyed()) {
+    callOpts.onProgress = (stream, chunk) => {
+      if (event.sender.isDestroyed()) return;
+      event.sender.send('package-manager:progress', { id, stream, chunk });
+    };
+  }
+  // Catch absolutely everything — a synchronous require() failure here
+  // would otherwise reject the invoke promise with no useful detail, and
+  // the renderer would see an empty list with no clue why.
+  try {
+    return await require('../ppm').runCommand(args, callOpts);
+  } catch (e) {
+    return { code: 1, stdout: '', stderr: String(e?.stack || e?.message || e) };
+  }
+});
+
 // The application's singleton class.
 //
 // It's the entry point into the Pulsar application and maintains the global state

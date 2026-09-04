@@ -2,11 +2,6 @@ const os = require('os');
 const path = require('path');
 const updatePackageDependencies = require('../lib/update-package-dependencies');
 
-let baseExecutableName = 'ppm';
-if (process.env.ATOM_BASE_NAME === 'pulsar-next') {
-  baseExecutableName = 'ppm-next';
-}
-
 describe('Update Package Dependencies', () => {
   let projectPath = null;
 
@@ -16,50 +11,46 @@ describe('Update Package Dependencies', () => {
   });
 
   describe('updating package dependencies', () => {
-    let { command, args, stderr, exit, options } = {};
+    let lastInvocation = null;
+    let resolvePending = null;
+
     beforeEach(() => {
-      spyOn(updatePackageDependencies, 'runBufferedProcess').andCallFake(
-        params => {
-          ({ command, args, stderr, exit, options } = params);
-          return true; // so that this.process isn't null
+      lastInvocation = null;
+      resolvePending = null;
+      spyOn(updatePackageDependencies, 'runPackageManager').andCallFake(
+        ({ args, opts }) => {
+          lastInvocation = { args, opts };
+          return new Promise(resolve => { resolvePending = resolve; });
         }
       );
     });
 
     afterEach(() => {
-      if (updatePackageDependencies.process) exit(0);
+      if (resolvePending) resolvePending({ code: 0, stdout: '', stderr: '' });
     });
 
-    it('runs the `apm install` command', () => {
+    it('invokes the in-process package manager with `install`', () => {
       updatePackageDependencies.update();
-
-      expect(updatePackageDependencies.runBufferedProcess).toHaveBeenCalled();
-      if (process.platform !== 'win32') {
-        expect(command.endsWith(`/${baseExecutableName}`)).toBe(true);
-      } else {
-        expect(command.endsWith(`\\${baseExecutableName}.cmd`)).toBe(true);
-      }
-      expect(args).toEqual(['install', '--no-color']);
-      expect(options.cwd).toEqual(projectPath);
+      expect(updatePackageDependencies.runPackageManager).toHaveBeenCalled();
+      expect(lastInvocation.args).toEqual(['install', '--no-color']);
+      expect(lastInvocation.opts.cwd).toEqual(projectPath);
     });
 
-    it('only allows one apm process to be spawned at a time', () => {
+    it('only allows one run to be in flight at a time', () => {
       updatePackageDependencies.update();
-      expect(updatePackageDependencies.runBufferedProcess.callCount).toBe(1);
+      expect(updatePackageDependencies.runPackageManager.callCount).toBe(1);
 
       updatePackageDependencies.update();
       updatePackageDependencies.update();
-      expect(updatePackageDependencies.runBufferedProcess.callCount).toBe(1);
+      expect(updatePackageDependencies.runPackageManager.callCount).toBe(1);
 
-      exit(0);
-      updatePackageDependencies.update();
-      expect(updatePackageDependencies.runBufferedProcess.callCount).toBe(2);
-    });
+      resolvePending({ code: 0, stdout: '', stderr: '' });
+      waitsFor(() => !updatePackageDependencies.running);
 
-    it('sets NODE_ENV to development in order to install devDependencies', () => {
-      updatePackageDependencies.update();
-
-      expect(options.env.NODE_ENV).toEqual('development');
+      runs(() => {
+        updatePackageDependencies.update();
+        expect(updatePackageDependencies.runPackageManager.callCount).toBe(2);
+      });
     });
 
     it('adds a status bar tile', async () => {
@@ -84,7 +75,8 @@ describe('Update Package Dependencies', () => {
       ).toBe(true);
       expect(tile.item.firstChild.classList.contains('loading')).toBe(true);
 
-      exit(0);
+      resolvePending({ code: 0, stdout: '', stderr: '' });
+      await Promise.resolve();
 
       tile = statusBar.mainModule.statusBar
         .getRightTiles()
@@ -99,38 +91,37 @@ describe('Update Package Dependencies', () => {
         await atom.workspace.open(path.join(projectPath, 'package.json'));
 
         updatePackageDependencies.update();
-        expect(options.cwd).toEqual(projectPath);
+        expect(lastInvocation.opts.cwd).toEqual(projectPath);
       });
     });
 
     describe('when the update succeeds', () => {
+      let notification = null;
       beforeEach(() => {
         updatePackageDependencies.update();
-        exit(0);
+        resolvePending({ code: 0, stdout: '', stderr: '' });
+        waitsFor(() => atom.notifications.getNotifications().length > 0);
+        runs(() => { notification = atom.notifications.getNotifications()[0]; });
       });
 
       it('shows a success notification message', () => {
-        const notification = atom.notifications.getNotifications()[0];
         expect(notification.getType()).toEqual('success');
-        expect(notification.getMessage()).toEqual(
-          'Package dependencies updated'
-        );
+        expect(notification.getMessage()).toEqual('Package dependencies updated');
       });
     });
 
     describe('when the update fails', () => {
+      let notification = null;
       beforeEach(() => {
         updatePackageDependencies.update();
-        stderr('oh bother');
-        exit(127);
+        resolvePending({ code: 127, stdout: '', stderr: 'oh bother' });
+        waitsFor(() => atom.notifications.getNotifications().length > 0);
+        runs(() => { notification = atom.notifications.getNotifications()[0]; });
       });
 
       it('shows a failure notification', () => {
-        const notification = atom.notifications.getNotifications()[0];
         expect(notification.getType()).toEqual('error');
-        expect(notification.getMessage()).toEqual(
-          'Failed to update package dependencies'
-        );
+        expect(notification.getMessage()).toEqual('Failed to update package dependencies');
         expect(notification.getDetail()).toEqual('oh bother');
         expect(notification.isDismissable()).toBe(true);
       });

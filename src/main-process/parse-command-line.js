@@ -152,21 +152,31 @@ module.exports = function parseCommandLine(processArgs) {
   let args = options.argv;
 
   if (args['package']) {
-    const PackageManager = require('../package-manager');
-    const cp = require('child_process');
-    const ppmPath = PackageManager.possibleApmPaths(version);
-
-    let ppmArgs = [...processArgs]
-    while (true) {
-      // Silently discard all arguments up to (and including) `--package`/`-p`.
+    // Strip everything up to and including the `-p`/`--package` flag,
+    // mirroring the trimming that the legacy shell wrapper used to do.
+    const ppmArgs = [...processArgs];
+    while (ppmArgs.length) {
       const arg = ppmArgs.shift();
-      if (arg === '-p' || arg === '--package' || ppmArgs.length === 0) {
-        break;
-      }
+      if (arg === '-p' || arg === '--package') break;
     }
-    const exitCode = cp.spawnSync(ppmPath, ppmArgs, { stdio: 'inherit' }).status;
-    process.exit(exitCode);
-    return;
+
+    // Mark the package-mode invocation so neither the renderer nor any
+    // spawned sub-process accidentally re-enters this branch.
+    process.env.PULSAR_PACKAGE_MODE = '1';
+
+    // Run the package manager in this same Electron main process — no
+    // child Node, no separate npm CLI. The new in-process module lives at
+    // `src/ppm/` and exposes `runCli(argv) -> Promise<exitCode>`.
+    require('../ppm').runCli(ppmArgs).then(
+      code => process.exit(code ?? 0),
+      err => { console.error(err?.stack || err?.message || err); process.exit(1); }
+    );
+    // The runCli promise resolves asynchronously and then calls
+    // process.exit. In the meantime we must NOT let the rest of Pulsar's
+    // startup run — `start.js` would try to open windows, register IPC
+    // handlers, etc. Return a sentinel that `start.js` checks before
+    // touching any of the returned fields.
+    return { packageMode: true };
   }
 
   if (args['help']) {
