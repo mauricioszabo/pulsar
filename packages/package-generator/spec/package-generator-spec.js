@@ -105,8 +105,7 @@ describe('Package Generator', () => {
       packageGeneratorView.confirm()
 
       expect(apmExecute).toHaveBeenCalled()
-      expect(apmExecute.mostRecentCall.args[0]).toBe(atom.packages.getApmPath())
-      expect(apmExecute.mostRecentCall.args[1]).toEqual(packageInitCommandFor(`${path.join(path.dirname(packagePath), 'camel-case-is-for-the-birds')}`))
+      expect(apmExecute.mostRecentCall.args[0]).toEqual(packageInitCommandFor(`${path.join(path.dirname(packagePath), 'camel-case-is-for-the-birds')}`))
     })
 
     it("normalizes the package's path", () => {
@@ -119,8 +118,7 @@ describe('Package Generator', () => {
       packageGeneratorView.confirm()
 
       expect(apmExecute).toHaveBeenCalled()
-      expect(apmExecute.mostRecentCall.args[0]).toBe(atom.packages.getApmPath())
-      expect(apmExecute.mostRecentCall.args[1]).toEqual(packageInitCommandFor(`${fs.normalize(packagePath)}`))
+      expect(apmExecute.mostRecentCall.args[0]).toEqual(packageInitCommandFor(`${fs.normalize(packagePath)}`))
     })
 
     for (const type of typeToPackageNameMap.keys()) {
@@ -132,7 +130,7 @@ describe('Package Generator', () => {
           spyOn(packageGeneratorView, 'isStoredInDotAtom').andReturn(insidePackagesDirectory)
           expect(packageGeneratorView.element.parentElement).toBeTruthy()
           editor.setText(packagePath)
-          apmExecute = spyOn(packageGeneratorView, 'runCommand').andCallFake((command, args, exit) => process.nextTick(() => exit()))
+          apmExecute = spyOn(packageGeneratorView, 'runCommand').andCallFake((args, exit) => process.nextTick(() => exit()))
           packageGeneratorView.confirm()
           await conditionPromise(() => atom.open.callCount === 1)
           expect(atom.open).toHaveBeenCalledWith({pathsToOpen: [packagePath]})
@@ -150,10 +148,8 @@ describe('Package Generator', () => {
               atom.config.set('package-generator.createInDevMode', false)
 
               await generatePackage(false)
-              expect(apmExecute.argsForCall[0][0]).toBe(atom.packages.getApmPath())
-              expect(apmExecute.argsForCall[0][1]).toEqual(packageInitCommandFor(`${packagePath}`, type))
-              expect(apmExecute.argsForCall[1][0]).toBe(atom.packages.getApmPath())
-              expect(apmExecute.argsForCall[1][1]).toEqual(['link', `${packagePath}`])
+              expect(apmExecute.argsForCall[0][0]).toEqual(packageInitCommandFor(`${packagePath}`, type))
+              expect(apmExecute.argsForCall[1][0]).toEqual(['link', `${packagePath}`])
             })
           })
 
@@ -162,10 +158,8 @@ describe('Package Generator', () => {
               atom.config.set('package-generator.createInDevMode', true)
 
               await generatePackage(false)
-              expect(apmExecute.argsForCall[0][0]).toBe(atom.packages.getApmPath())
-              expect(apmExecute.argsForCall[0][1]).toEqual(packageInitCommandFor(`${packagePath}`, type))
-              expect(apmExecute.argsForCall[1][0]).toBe(atom.packages.getApmPath())
-              expect(apmExecute.argsForCall[1][1]).toEqual(['link', '--dev', `${packagePath}`])
+              expect(apmExecute.argsForCall[0][0]).toEqual(packageInitCommandFor(`${packagePath}`, type))
+              expect(apmExecute.argsForCall[1][0]).toEqual(['link', '--dev', `${packagePath}`])
             })
           })
         })
@@ -173,8 +167,7 @@ describe('Package Generator', () => {
         describe(`when the ${type} is created inside the packages directory`, () => {
           it('calls `apm init`', async () => {
             await generatePackage(true)
-            expect(apmExecute.argsForCall[0][0]).toBe(atom.packages.getApmPath())
-            expect(apmExecute.argsForCall[0][1]).toEqual(packageInitCommandFor(`${packagePath}`, type))
+            expect(apmExecute.argsForCall[0][0]).toEqual(packageInitCommandFor(`${packagePath}`, type))
             expect(atom.open.argsForCall[0][0].pathsToOpen[0]).toBe(packagePath)
             expect(apmExecute.argsForCall[1]).toBeUndefined()
           })
@@ -184,8 +177,7 @@ describe('Package Generator', () => {
           it('calls `apm init` with the correct syntax option', async () => {
             atom.config.set('package-generator.packageSyntax', 'coffeescript')
             await generatePackage(true)
-            expect(apmExecute.argsForCall[0][0]).toBe(atom.packages.getApmPath())
-            expect(apmExecute.argsForCall[0][1]).toEqual(packageInitCommandFor(`${packagePath}`, type, 'coffeescript'))
+            expect(apmExecute.argsForCall[0][0]).toEqual(packageInitCommandFor(`${packagePath}`, type, 'coffeescript'))
           })
         })
 
@@ -193,8 +185,7 @@ describe('Package Generator', () => {
           it('calls `apm init` with the correct syntax option', async () => {
             atom.config.set('package-generator.packageSyntax', 'javascript')
             await generatePackage(true)
-            expect(apmExecute.argsForCall[0][0]).toBe(atom.packages.getApmPath())
-            expect(apmExecute.argsForCall[0][1]).toEqual(packageInitCommandFor(`${packagePath}`, type, 'javascript'))
+            expect(apmExecute.argsForCall[0][0]).toEqual(packageInitCommandFor(`${packagePath}`, type, 'javascript'))
           })
         })
 

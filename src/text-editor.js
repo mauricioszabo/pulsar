@@ -86,14 +86,30 @@ module.exports = class TextEditor {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateStyles();
+    TextEditorComponent.didUpdateStyles();
+    // Also notify the experimental SolidJS-based component if any
+    // editors are using it (core.useNewTextEditor === true). Without
+    // this, font/zoom/theme changes wouldn't trigger a re-measure on
+    // those editors and the cursor would drift away from the text.
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static didUpdateScrollbarStyles() {
     if (TextEditorComponent == null) {
       TextEditorComponent = require('./text-editor-component');
     }
-    return TextEditorComponent.didUpdateScrollbarStyles();
+    TextEditorComponent.didUpdateScrollbarStyles();
+    try {
+      const PulsarTextEditor = require('./pulsar-text-editor');
+      PulsarTextEditor.didUpdateScrollbarStyles();
+    } catch (e) {
+      // Module not loaded; nothing to notify.
+    }
   }
 
   static viewForItem(item) {
@@ -4654,27 +4670,27 @@ module.exports = class TextEditor {
   */
 
   // Essential: For each selection, copy the selected text.
-  copySelectedText() {
+  async copySelectedText() {
     let maintainClipboard = false;
     for (let selection of this.getSelectionsOrderedByBufferPosition()) {
       if (selection.isEmpty()) {
         const previousRange = selection.getBufferRange();
         selection.selectLine();
-        selection.copy(maintainClipboard, true);
+        await selection.copy(maintainClipboard, true);
         selection.setBufferRange(previousRange);
       } else {
-        selection.copy(maintainClipboard, false);
+        await selection.copy(maintainClipboard, false);
       }
       maintainClipboard = true;
     }
   }
 
   // Private: For each selection, only copy highlighted text.
-  copyOnlySelectedText() {
+  async copyOnlySelectedText() {
     let maintainClipboard = false;
     for (let selection of this.getSelectionsOrderedByBufferPosition()) {
       if (!selection.isEmpty()) {
-        selection.copy(maintainClipboard, false);
+        await selection.copy(maintainClipboard, false);
         maintainClipboard = true;
       }
     }
@@ -4684,18 +4700,18 @@ module.exports = class TextEditor {
   //
   // * `options` (optional) {Object}
   //   * `bypassReadOnly` (optional) {Boolean} Must be `true` to modify a read-only editor.
-  cutSelectedText(options = {}) {
+  async cutSelectedText(options = {}) {
     if (!this.ensureWritable('cutSelectedText', options)) return;
     let maintainClipboard = false;
-    this.mutateSelectedText(selection => {
+    for (let selection of this.getSelectionsOrderedByBufferPosition()) {
       if (selection.isEmpty()) {
         selection.selectLine();
-        selection.cut(maintainClipboard, true, options.bypassReadOnly);
+        await selection.cut(maintainClipboard, true, options.bypassReadOnly);
       } else {
-        selection.cut(maintainClipboard, false, options.bypassReadOnly);
+        await selection.cut(maintainClipboard, false, options.bypassReadOnly);
       }
       maintainClipboard = true;
-    });
+    }
   }
 
   // Essential: For each selection, replace the selected text with the contents of
@@ -4706,13 +4722,13 @@ module.exports = class TextEditor {
   // corresponding clipboard selection text.
   //
   // * `options` (optional) See {Selection::insertText}.
-  pasteText(options = {}) {
+  async pasteText(options = {}) {
     if (!this.ensureWritable('parseText', options)) return;
     options = Object.assign({}, options);
     let {
       text: clipboardText,
       metadata
-    } = this.constructor.clipboard.readWithMetadata();
+    } = await this.constructor.clipboard.readWithMetadata();
     if (!this.emitWillInsertTextEvent(clipboardText)) return false;
     let languageMode = this.buffer.getLanguageMode();
 
@@ -4807,13 +4823,13 @@ module.exports = class TextEditor {
   //
   // * `options` (optional) {Object}
   //   * `bypassReadOnly` (optional) {Boolean} Must be `true` to modify a read-only editor.
-  cutToEndOfLine(options = {}) {
+  async cutToEndOfLine(options = {}) {
     if (!this.ensureWritable('cutToEndOfLine', options)) return;
     let maintainClipboard = false;
-    this.mutateSelectedText(selection => {
-      selection.cutToEndOfLine(maintainClipboard, options);
+    for (let selection of this.getSelectionsOrderedByBufferPosition()) {
+      await selection.cutToEndOfLine(maintainClipboard, options);
       maintainClipboard = true;
-    });
+    }
   }
 
   // Essential: For each selection, if the selection is empty, cut all characters
@@ -4822,13 +4838,13 @@ module.exports = class TextEditor {
   //
   // * `options` (optional) {Object}
   //   * `bypassReadOnly` (optional) {Boolean} Must be `true` to modify a read-only editor.
-  cutToEndOfBufferLine(options = {}) {
+  async cutToEndOfBufferLine(options = {}) {
     if (!this.ensureWritable('cutToEndOfBufferLine', options)) return;
     let maintainClipboard = false;
-    this.mutateSelectedText(selection => {
-      selection.cutToEndOfBufferLine(maintainClipboard, options);
+    for (let selection of this.getSelectionsOrderedByBufferPosition()) {
+      await selection.cutToEndOfBufferLine(maintainClipboard, options);
       maintainClipboard = true;
-    });
+    }
   }
 
   /*
@@ -5310,11 +5326,22 @@ module.exports = class TextEditor {
   // Get the Element for the editor.
   getElement() {
     if (!this.component) {
-      if (!TextEditorComponent)
-        TextEditorComponent = require('./text-editor-component');
+      // The `core.useNewTextEditor` flag (see ADR 006) opts a window into
+      // the experimental SolidJS-based implementation under
+      // `src/pulsar-text-editor/`. This is the model-driven creation
+      // path; the parallel path in text-editor-element.js#getComponent
+      // honors the same flag.
+      const useNew =
+        global.atom &&
+        global.atom.config &&
+        global.atom.config.get('core.useNewTextEditor') === true;
+      const ComponentClass = useNew
+        ? require('./pulsar-text-editor')
+        : (TextEditorComponent ||
+            (TextEditorComponent = require('./text-editor-component')));
       if (!TextEditorElement)
         TextEditorElement = require('./text-editor-element');
-      this.component = new TextEditorComponent({
+      this.component = new ComponentClass({
         model: this,
         updatedSynchronously: TextEditorElement.prototype.updatedSynchronously,
         initialScrollTopRow: this.initialScrollTopRow,

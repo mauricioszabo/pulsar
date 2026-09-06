@@ -3,7 +3,7 @@ name: Build Pulsar Binaries
 on:
   push:
     branches:
-      - 'master'
+      - '**'
     tags:
       - '**'
   pull_request:
@@ -23,15 +23,10 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ macos-14, ubuntu-24.04-arm, ubuntu-latest, windows-2022 ]
-        node-architecture: [ '' ]
+        os: [ ubuntu-latest ]
         include:
-          - os: macos-14
-            node-architecture: x64
-          - os: ubuntu-24.04-arm
-            image: "debian:10"
           - os: ubuntu-latest
-            image: "debian:10"
+            image: "debian:13"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.image }}
@@ -39,14 +34,9 @@ jobs:
       timestamp: ${{ steps.linux-binary-version.outputs.timestamp }}
 
     steps:
-    - name: Edit sources.list - Linux
-      if: ${{ runner.os == 'Linux' }}
-      run: |
-        sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list
-        sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
     - name: Install build dependencies - Linux
       if: ${{ runner.os == 'Linux' }}
-      run: apt-get update && apt-get install -y git python3 python3-pip make gcc g++ libx11-dev libxkbfile-dev pkg-config libsecret-1-dev rpm xvfb ffmpeg zstd wget squashfs-tools libwayland-dev libwayland-client0 libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0 xkb-data
+      run: apt-get update && apt-get install -y git file python3 python3-pip make gcc g++ libx11-dev libxkbfile-dev pkg-config libsecret-1-dev rpm xvfb ffmpeg zstd wget squashfs-tools libwayland-dev libwayland-client0 libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0 xkb-data
        libncursesw5-dev libssl-dev libsqlite3-dev tk-dev libgdbm-dev libc6-dev libbz2-dev libffi-dev zlib1g-dev # <-- Python-related stuff on this line
 
     - name: Restore Compiled Python from Cache - Linux
@@ -54,7 +44,7 @@ jobs:
       id: compiled-python-restore
       uses: actions/cache/restore@v5
       with:
-        key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.image }}-Python-${{ env.PYTHON_VERSION }}.9
+        key: ${{ runner.os }}-${{ matrix.image }}-Python-${{ env.PYTHON_VERSION }}.9
         path: Python-${{ env.PYTHON_VERSION }}.9
 
     - name: Compile Python - Linux
@@ -71,7 +61,7 @@ jobs:
       if: ${{ runner.os == 'Linux' && steps.compiled-python-restore.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v5
       with:
-        key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.image }}-Python-${{ env.PYTHON_VERSION }}.9
+        key: ${{ runner.os }}-${{ matrix.image }}-Python-${{ env.PYTHON_VERSION }}.9
         path: Python-${{ env.PYTHON_VERSION }}.9
 
     - name: Install Compiled Python - Linux
@@ -85,7 +75,7 @@ jobs:
       uses: actions/setup-node@v6
       with:
         node-version-file: '.nvmrc'
-        architecture: ${{ matrix.node-architecture }}
+        architecture: 'x64'
 
     - name: Setup Python
       # actions/setup-python's copy of Python is compiled for too new glibc,
@@ -134,6 +124,12 @@ jobs:
       if: ${{ runner.os == 'Windows' }}
       run: (Get-Content package.json) -replace '[0-9]*-dev', (date -u +%Y%m%d%H) | Set-Content -Path package.json
 
+    - name: Reinstall Current Node-GYP NodeJS Headers
+      # Overwrite bad headers that get downloaded.
+      # NodeJS versions above 16 should come with `node-gyp@9.4.0` that has a fix
+      # for this issue. At that point this additional step can be removed.
+      run: npx node-gyp install ${{ env.NODE_VERSION }}
+
     - name: Explicitly Specify Python Path (Windows)
       if: ${{ runner.os == 'Windows' }}
       # The Windows image somehow gets confused about which Python it should
@@ -170,14 +166,14 @@ jobs:
         retry_on: error
         command: yarn build
 
-    - name: Build ppm
-      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
-      with:
-        timeout_minutes: 30
-        max_attempts: 3
-        retry_on: error
-        command: yarn build:apm
-
+    # - name: Build ppm
+    #   uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+    #   with:
+    #     timeout_minutes: 30
+    #     max_attempts: 3
+    #     retry_on: error
+    #     command: yarn build:apm
+    #
     - name: Cache Pulsar dependencies - Linux
       if: ${{ runner.os == 'Linux' }}
       uses: actions/cache/save@v5
@@ -185,7 +181,7 @@ jobs:
         path: |
           node_modules
           packages
-        key: Linux-dependencies-${{ runner.arch }}-${{ github.sha }}-${{ github.workflow }}
+        key: Linux-dependencies-${{ github.sha }}-${{ github.workflow }}
 
     # macOS Signing Stuff
     - name: Build Pulsar Binaries (macOS) (Signed)
@@ -222,45 +218,29 @@ jobs:
         retry_on: error
         command: yarn dist
 
-    - name: Rename Pulsar Binaries for Regular release (ARM64 Linux)
-      if: ${{ runner.os == 'Linux' && runner.arch == 'ARM64' }}
-      run: node ./script/rename.js "ARM.Linux"
-
-    - name: Rename Pulsar Binaries for Regular release (x64 Linux)
-      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
+    - name: Rename Pulsar Binaries for Regular release (Linux)
+      if: ${{ runner.os == 'Linux' }}
       run: node ./script/rename.js "Linux"
 
-    - name: Rename Pulsar Binaries for Regular release (ARM64 macOS)
-      if: ${{ runner.os == 'macOS' && runner.arch == 'ARM64' && matrix.node-architecture != 'x64' }}
-      run: node ./script/rename.js "Silicon.Mac"
-
-    - name: Rename Pulsar Binaries for Regular release (x64 macOS)
-      if: ${{ runner.os == 'macOS' && ( runner.arch == 'X64' || matrix.node-architecture == 'x64' ) }}
+    - name: Rename Pulsar Binaries for Regular release (macOS)
+      if: ${{ runner.os == 'macOS' }}
       run: node ./script/rename.js "Intel.Mac"
 
     - name: Rename Pulsar Binaries for Regular release (Windows)
       if: ${{ runner.os == 'Windows' }}
       run: node ./script/rename.js "Windows"
 
-    - name: Fix AppImage target - x64 Linux
-      if: ${{ runner.os == 'Linux' && runner.arch == 'X64' }}
-      run: ./script/fix-linux-appimage.sh x86_64
-
-    - name: Fix AppImage target - ARM64 Linux
-      if: ${{ runner.os == 'Linux' && runner.arch == 'ARM64' }}
-      run: ./script/fix-linux-appimage.sh ARM_64
-
     - name: Cache Pulsar Binaries - Linux
       if: ${{ runner.os == 'Linux' }}
       uses: actions/cache/save@v5
       with:
         path: ./binaries
-        key: pulsar-Linux-Binaries-${{ runner.arch }}-${{ github.sha }}-${{ github.workflow }}
+        key: pulsar-Linux-Binaries-${{ github.sha }}-${{ github.workflow }}
 
     - name: Upload Binary Artifacts
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ matrix.os }} ${{ matrix.node-architecture }} Binaries
+        name: ${{ matrix.os }} Binaries
         path: ./binaries/*
 
     - name: Test Binary - Windows
@@ -303,11 +283,7 @@ jobs:
     # Debian Docker environment. If anyone can make it work, feel free to
     # re-combine visual testing on Linux back into the main build job above!
     # - DeeDeeG
-    strategy:
-      matrix:
-        os: [ ubuntu-24.04-arm, ubuntu-latest ]
-      fail-fast: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     needs: build
 
     steps:
@@ -328,7 +304,7 @@ jobs:
       uses: actions/cache/restore@v5
       with:
         path: ./binaries
-        key: pulsar-Linux-Binaries-${{ runner.arch }}-${{ github.sha }}-${{ github.workflow }}
+        key: pulsar-Linux-Binaries-${{ github.sha }}-${{ github.workflow }}
 
     - name: Restore Cached Pulsar dependencies - Linux
       if: ${{ runner.os == 'Linux' }}
@@ -337,7 +313,7 @@ jobs:
         path: |
           node_modules
           packages
-        key: Linux-dependencies-${{ runner.arch }}-${{ github.sha }}-${{ github.workflow }}
+        key: Linux-dependencies-${{ github.sha }}-${{ github.workflow }}
 
     - name: Test Binary - Linux
       if: ${{ (runner.os == 'Linux') && env.RUN_LINUX_VT }}

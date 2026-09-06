@@ -7,13 +7,19 @@ describe("PackageManager", function() {
   let [packageManager] = [];
 
   beforeEach(function() {
-    spyOn(atom.packages, 'getApmPath').andReturn('/an/invalid/apm/command/to/run');
     atom.config.set('core.useProxySettingsWhenCallingApm', false);
     packageManager = new PackageManager();
   });
 
-  it("handle errors spawning apm", function() {
-    const noSuchCommandError = process.platform === 'win32' ? ' cannot find the path ' : 'ENOENT';
+  it("handles errors from the in-process package manager", function() {
+    const stderrMessage = 'simulated package manager failure';
+    // Stub `runCommand` so each call reports a non-zero exit code through
+    // its callback \u2014 the same shape the IPC handler produces on failure.
+    spyOn(packageManager, 'runCommand').andCallFake(function(args, callback) {
+      setTimeout(() => callback(1, '', stderrMessage), 0);
+      return {onWillThrowError() { return {dispose() {}}; }};
+    });
+
     waitsForPromise({shouldReject: true}, () => packageManager.getInstalled());
     waitsForPromise({shouldReject: true}, () => packageManager.getOutdated());
     waitsForPromise({shouldReject: true}, () => packageManager.getFeatured());
@@ -31,7 +37,7 @@ describe("PackageManager", function() {
       const installArg = installCallback.argsForCall[0][0];
       expect(installArg.message).toBe("Installing \u201Cfoo@1.0.0\u201D failed.");
       expect(installArg.packageInstallError).toBe(true);
-      expect(installArg.stderr).toContain(noSuchCommandError);
+      expect(installArg.stderr).toContain(stderrMessage);
 
       return packageManager.uninstall({name: 'foo'}, uninstallCallback);
     });
@@ -41,7 +47,7 @@ describe("PackageManager", function() {
     runs(function() {
       const uninstallArg = uninstallCallback.argsForCall[0][0];
       expect(uninstallArg.message).toBe("Uninstalling \u201Cfoo\u201D failed.");
-      expect(uninstallArg.stderr).toContain(noSuchCommandError);
+      expect(uninstallArg.stderr).toContain(stderrMessage);
 
       return packageManager.update({name: 'foo'}, '1.0.0', updateCallback);
     });
@@ -52,7 +58,7 @@ describe("PackageManager", function() {
       const updateArg = updateCallback.argsForCall[0][0];
       expect(updateArg.message).toBe("Updating to \u201Cfoo@1.0.0\u201D failed.");
       expect(updateArg.packageInstallError).toBe(true);
-      expect(updateArg.stderr).toContain(noSuchCommandError);
+      expect(updateArg.stderr).toContain(stderrMessage);
     });
   });
 
