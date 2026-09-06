@@ -5,7 +5,7 @@ const TextEditor = require('./text-editor');
 const { isPairedCharacter, hasRtlText } = require('./text-utils');
 const { walkScreenLineTags } = require('./screen-line-tag-walker');
 const electron = require('electron');
-const clipboard = electron.clipboard;
+const clipboard = require('@electron/remote').clipboard;
 const $ = etch.dom;
 
 let TextEditorElement;
@@ -2009,7 +2009,7 @@ module.exports = class TextEditorComponent {
     event.target.value = '';
   }
 
-  didMouseDownOnContent(event) {
+  async didMouseDownOnContent(event) {
     const { model } = this.props;
     const { target, button, detail, ctrlKey, shiftKey, metaKey } = event;
     const platform = this.getPlatform();
@@ -2038,8 +2038,12 @@ module.exports = class TextEditorComponent {
         platform === 'linux' &&
         this.isInputEnabled() &&
         atom.config.get('editor.selectionClipboard')
-      )
-        model.insertText(clipboard.readText('selection'));
+      ) {
+        const text = clipboard.selection
+          ? await clipboard.selection.readText()
+          : await clipboard.readText('selection');
+        model.insertText(text);
+      }
       return;
     }
 
