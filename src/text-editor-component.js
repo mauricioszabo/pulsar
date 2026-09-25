@@ -2,6 +2,7 @@ const etch = require('etch');
 const { Point, Range } = require('@pulsar-edit/text-buffer');
 const LineTopIndex = require('line-top-index');
 const TextEditor = require('./text-editor');
+const Decoration = require('./decoration');
 const { isPairedCharacter, hasRtlText } = require('./text-utils');
 const electron = require('electron');
 const clipboard = electron.clipboard;
@@ -16,6 +17,7 @@ const HALF_WIDTH_CHARACTER = 'ﾊ';
 const KOREAN_CHARACTER = '세';
 const NBSP_CHARACTER = '\u00a0';
 const ZERO_WIDTH_NBSP_CHARACTER = '\ufeff';
+const EMPTY_INLAY_DECORATIONS = [];
 const MOUSE_DRAG_AUTOSCROLL_MARGIN = 40;
 const CURSOR_BLINK_RESUME_DELAY = 300;
 const CURSOR_BLINK_PERIOD = 800;
@@ -127,6 +129,10 @@ module.exports = class TextEditorComponent {
     this.blockDecorationResizeObserver = new ResizeObserver(
       this.didResizeBlockDecorations.bind(this)
     );
+    this.inlayResizeObserver = new ResizeObserver(
+      this.didResizeInlayDecorations.bind(this)
+    );
+    this.extraInlayDecorationsByRow = new Map();
     this.lineComponentsByScreenLineId = new Map();
     this.overlayComponents = new Set();
     this.shouldRenderDummyScrollbars = true;
@@ -164,7 +170,8 @@ module.exports = class TextEditorComponent {
       overlays: [],
       customGutter: new Map(),
       blocks: new Map(),
-      text: []
+      text: [],
+      inlays: []
     };
     this.decorationsToMeasure = {
       highlights: [],
@@ -681,9 +688,16 @@ module.exports = class TextEditorComponent {
               tileStartRow - startRow,
               tileEndRow - startRow
             ),
+            inlayDecorations: this.decorationsToRender.inlays.slice(
+              tileStartRow - startRow,
+              tileEndRow - startRow
+            ),
             blockDecorations: this.decorationsToRender.blocks.get(tileStartRow),
             displayLayer: this.props.model.displayLayer,
             nodePool: this.lineNodesPool,
+            inlayResizeObserver: this.inlayResizeObserver,
+            horizontalPixelPositionsByScreenLineId: this
+              .horizontalPixelPositionsByScreenLineId,
             lineComponentsByScreenLineId
           })
         );
@@ -697,8 +711,12 @@ module.exports = class TextEditorComponent {
               offScreen: true,
               screenLine,
               screenRow,
+              inlayDecorations: this.extraInlayDecorationsByRow.get(screenRow),
               displayLayer: this.props.model.displayLayer,
               nodePool: this.lineNodesPool,
+              inlayResizeObserver: this.inlayResizeObserver,
+              horizontalPixelPositionsByScreenLineId: this
+                .horizontalPixelPositionsByScreenLineId,
               lineComponentsByScreenLineId
             })
           );
@@ -940,11 +958,39 @@ module.exports = class TextEditorComponent {
 
   queryExtraScreenLinesToRender() {
     this.extraRenderedScreenLines.clear();
+    this.extraInlayDecorationsByRow.clear();
     this.linesToMeasure.forEach((screenLine, row) => {
       if (row < this.getRenderedStartRow() || row >= this.getRenderedEndRow()) {
         this.extraRenderedScreenLines.set(row, screenLine);
+        const inlays = this.queryInlayDecorationsForRow(row);
+        if (inlays) this.extraInlayDecorationsByRow.set(row, inlays);
       }
     });
+  }
+
+  // Collects the inlay decorations of a single screen row that lies outside
+  // the rendered range, so off-screen lines rendered only for measurement
+  // have the same horizontal layout as they would when on screen.
+  queryInlayDecorationsForRow(row) {
+    let inlays = null;
+    const decorationsByMarker = this.props.model.decorationManager.decorationPropertiesByMarkerForScreenRowRange(
+      row,
+      row + 1
+    );
+    decorationsByMarker.forEach((decorations, marker) => {
+      const screenRange = marker.getScreenRange();
+      for (let i = 0; i < decorations.length; i++) {
+        const decoration = decorations[i];
+        if (!Decoration.isType(decoration, 'inlay')) continue;
+        const inlay = this.buildInlayToRender(decoration, screenRange);
+        if (inlay && inlay.row === row) {
+          if (!inlays) inlays = [];
+          inlays.push(inlay);
+        }
+      }
+    });
+    if (inlays) inlays.sort(compareInlays);
+    return inlays;
   }
 
   queryLineNumbersToRender() {
@@ -1053,6 +1099,7 @@ module.exports = class TextEditorComponent {
     this.decorationsToRender.customGutter.clear();
     this.decorationsToRender.blocks = new Map();
     this.decorationsToRender.text = [];
+    this.decorationsToRender.inlays = [];
     this.decorationsToMeasure.highlights.length = 0;
     this.decorationsToMeasure.cursors.clear();
     this.textDecorationsByMarker.clear();
@@ -1079,6 +1126,11 @@ module.exports = class TextEditorComponent {
     });
 
     this.populateTextDecorationsToRender();
+
+    const { inlays } = this.decorationsToRender;
+    for (let i = 0; i < inlays.length; i++) {
+      if (inlays[i]) inlays[i].sort(compareInlays);
+    }
   }
 
   addDecorationToRender(type, decoration, marker, screenRange, reversed) {
@@ -1129,6 +1181,9 @@ module.exports = class TextEditorComponent {
           break;
         case 'text':
           this.addTextDecorationToRender(decoration, screenRange, marker);
+          break;
+        case 'inlay':
+          this.addInlayDecorationToRender(decoration, screenRange);
           break;
       }
     }
@@ -1365,6 +1420,43 @@ module.exports = class TextEditorComponent {
       });
     }
     decorationsForMarker.push(decoration);
+  }
+
+  buildInlayToRender(decoration, screenRange) {
+    const { item } = decoration;
+    if (item == null) return null;
+
+    const after = decoration.position === 'after';
+    const { row } = after ? screenRange.end : screenRange.start;
+    let { column } = after ? screenRange.end : screenRange.start;
+    const lineLength = this.props.model.lineLengthForScreenRow(row);
+    if (column > lineLength) column = lineLength;
+
+    return {
+      row,
+      column,
+      after,
+      order: decoration.order,
+      id: decoration.id,
+      element: TextEditor.viewForItem(item),
+      className: decoration.class
+    };
+  }
+
+  addInlayDecorationToRender(decoration, screenRange) {
+    const inlay = this.buildInlayToRender(decoration, screenRange);
+    if (!inlay) return;
+    const { row } = inlay;
+    if (row < this.getRenderedStartRow() || row >= this.getRenderedEndRow())
+      return;
+
+    const index = row - this.getRenderedStartRow();
+    let inlaysForRow = this.decorationsToRender.inlays[index];
+    if (!inlaysForRow) {
+      inlaysForRow = [];
+      this.decorationsToRender.inlays[index] = inlaysForRow;
+    }
+    inlaysForRow.push(inlay);
   }
 
   populateTextDecorationsToRender() {
@@ -2003,11 +2095,14 @@ module.exports = class TextEditorComponent {
     const { target, button, detail, ctrlKey, shiftKey, metaKey } = event;
     const platform = this.getPlatform();
 
-    // Ignore clicks on block decorations.
+    // Ignore clicks on block and inlay decorations.
     if (target) {
       let element = target;
       while (element && element !== this.element) {
-        if (this.blockDecorationsByElement.has(element)) {
+        if (
+          this.blockDecorationsByElement.has(element) ||
+          (element.classList && element.classList.contains('inlay-decoration'))
+        ) {
           return;
         }
 
@@ -2606,8 +2701,17 @@ module.exports = class TextEditorComponent {
       const lineComponent = this.lineComponentsByScreenLineId.get(
         this.longestLineToMeasure.id
       );
-      this.measurements.longestLineWidth =
-        lineComponent.element.firstChild.offsetWidth;
+      if (lineComponent.inlayWrappers.length > 0) {
+        // Inlays split the line's content across more than one top-level
+        // child, so `firstChild.offsetWidth` alone would undercount it.
+        rangeForMeasurement ??= document.createRange();
+        rangeForMeasurement.setStartBefore(lineComponent.element.firstChild);
+        rangeForMeasurement.setEndAfter(lineComponent.element.lastChild);
+        this.measurements.longestLineWidth = rangeForMeasurement.getBoundingClientRect().width;
+      } else {
+        this.measurements.longestLineWidth =
+          lineComponent.element.firstChild.offsetWidth;
+      }
       this.longestLineToMeasure = null;
     }
   }
@@ -2674,7 +2778,8 @@ module.exports = class TextEditorComponent {
         lineNode,
         textNodes,
         columnsToMeasure,
-        positionsForLine
+        positionsForLine,
+        lineComponent.inlayCaretAnchors
       );
     });
     this.horizontalPositionsToMeasure.clear();
@@ -2684,7 +2789,8 @@ module.exports = class TextEditorComponent {
     lineNode,
     textNodes,
     columnsToMeasure,
-    positions
+    positions,
+    inlayCaretAnchors
   ) {
     let lineNodeClientLeft = -1;
     let textNodeStartColumn = 0;
@@ -2698,6 +2804,28 @@ module.exports = class TextEditorComponent {
       columnsIndex++
     ) {
       const nextColumnToMeasure = columnsToMeasure[columnsIndex];
+
+      if (positions.has(nextColumnToMeasure)) continue columnLoop; // eslint-disable-line no-labels
+
+      // A column with inlay decorations doesn't correspond to a text-node
+      // boundary on its own, so the caret there is measured against the
+      // inlay wrapper(s) instead: to the right of the last before-inlay, or
+      // to the left of the first after-inlay.
+      const caretAnchor =
+        inlayCaretAnchors && inlayCaretAnchors.get(nextColumnToMeasure);
+      if (caretAnchor) {
+        if (lineNodeClientLeft === -1) {
+          lineNodeClientLeft = lineNode.getBoundingClientRect().left;
+        }
+        const rect = caretAnchor.element.getBoundingClientRect();
+        const clientPixelPosition = rect[caretAnchor.edge];
+        positions.set(
+          nextColumnToMeasure,
+          Math.round(clientPixelPosition - lineNodeClientLeft)
+        );
+        continue;
+      }
+
       while (textNodesIndex < textNodes.length) {
         if (positions.has(nextColumnToMeasure)) continue columnLoop; // eslint-disable-line no-labels
         const textNode = textNodes[textNodesIndex];
@@ -2808,11 +2936,31 @@ module.exports = class TextEditorComponent {
     }
     let rowLength = model.lineLengthForScreenRow(row);
 
-    let { textNodes } = this.lineComponentsByScreenLineId.get(screenLine.id);
+    let lineComponent = this.lineComponentsByScreenLineId.get(screenLine.id);
+    let { textNodes, inlayWrappers } = lineComponent;
 
     let linesClientRect = this.refs.lineTiles.getBoundingClientRect();
     let targetClientLeft = linesClientRect.left + Math.max(0, left);
     let targetClientTop = linesClientRect.top + Math.max(0, top);
+
+    // STRATEGY 0:
+    //
+    // Inlay decorations are opaque, arbitrary content, so `caretRangeFromPoint`
+    // below could land inside one of them (on the package's own DOM) rather
+    // than on this line's text. Check for that first and, if so, resolve to
+    // the inlay's anchor column directly.
+    if (inlayWrappers.length > 0) {
+      const inlayWrapper = inlayWrappers.find(({ wrapper }) => {
+        const rect = wrapper.getBoundingClientRect();
+        return (
+          targetClientLeft >= rect.left &&
+          targetClientLeft <= rect.right &&
+          targetClientTop >= rect.top &&
+          targetClientTop <= rect.bottom
+        );
+      });
+      if (inlayWrapper) return Point(row, inlayWrapper.column);
+    }
 
     // STRATEGY 1:
     //
@@ -3205,6 +3353,29 @@ module.exports = class TextEditorComponent {
         this.invalidateBlockDecorationDimensions(decoration);
       }
     }
+  }
+
+  // An inlay item resized (e.g. its content changed). Its row's cached
+  // horizontal pixel positions no longer reflect where later columns land,
+  // so drop them and let the next measurement pass recompute them.
+  didResizeInlayDecorations(entries) {
+    if (!this.visible) return;
+
+    let invalidatedAny = false;
+    for (let i = 0; i < entries.length; i++) {
+      const { target } = entries[i];
+      const lineElement = target.closest('.line');
+      if (!lineElement || !this.element.contains(lineElement)) continue;
+
+      const row = Number(lineElement.dataset.screenRow);
+      const screenLine = this.renderedScreenLineForRow(row);
+      if (screenLine) {
+        this.horizontalPixelPositionsByScreenLineId.delete(screenLine.id);
+        invalidatedAny = true;
+      }
+    }
+
+    if (invalidatedAny) this.scheduleUpdate();
   }
 
   invalidateBlockDecorationDimensions(decoration) {
@@ -4529,8 +4700,11 @@ class LinesTileComponent {
       screenLines,
       lineDecorations,
       textDecorations,
+      inlayDecorations,
       nodePool,
       displayLayer,
+      inlayResizeObserver,
+      horizontalPixelPositionsByScreenLineId,
       lineComponentsByScreenLineId
     } = this.props;
 
@@ -4541,8 +4715,11 @@ class LinesTileComponent {
         screenRow: tileStartRow + i,
         lineDecoration: lineDecorations[i],
         textDecorations: textDecorations[i],
+        inlayDecorations: inlayDecorations ? inlayDecorations[i] : null,
         displayLayer,
         nodePool,
+        inlayResizeObserver,
+        horizontalPixelPositionsByScreenLineId,
         lineComponentsByScreenLineId
       });
       this.element.appendChild(component.element);
@@ -4556,8 +4733,11 @@ class LinesTileComponent {
       tileStartRow,
       lineDecorations,
       textDecorations,
+      inlayDecorations,
       nodePool,
       displayLayer,
+      inlayResizeObserver,
+      horizontalPixelPositionsByScreenLineId,
       lineComponentsByScreenLineId
     } = newProps;
 
@@ -4582,8 +4762,13 @@ class LinesTileComponent {
           screenRow: tileStartRow + newScreenLineIndex,
           lineDecoration: lineDecorations[newScreenLineIndex],
           textDecorations: textDecorations[newScreenLineIndex],
+          inlayDecorations: inlayDecorations
+            ? inlayDecorations[newScreenLineIndex]
+            : null,
           displayLayer,
           nodePool,
+          inlayResizeObserver,
+          horizontalPixelPositionsByScreenLineId,
           lineComponentsByScreenLineId
         });
         this.element.appendChild(newScreenLineComponent.element);
@@ -4601,7 +4786,10 @@ class LinesTileComponent {
         lineComponent.update({
           screenRow: tileStartRow + newScreenLineIndex,
           lineDecoration: lineDecorations[newScreenLineIndex],
-          textDecorations: textDecorations[newScreenLineIndex]
+          textDecorations: textDecorations[newScreenLineIndex],
+          inlayDecorations: inlayDecorations
+            ? inlayDecorations[newScreenLineIndex]
+            : null
         });
 
         oldScreenLineIndex++;
@@ -4626,8 +4814,13 @@ class LinesTileComponent {
               screenRow: tileStartRow + newScreenLineIndex,
               lineDecoration: lineDecorations[newScreenLineIndex],
               textDecorations: textDecorations[newScreenLineIndex],
+              inlayDecorations: inlayDecorations
+                ? inlayDecorations[newScreenLineIndex]
+                : null,
               displayLayer,
               nodePool,
+              inlayResizeObserver,
+              horizontalPixelPositionsByScreenLineId,
               lineComponentsByScreenLineId
             });
             this.element.insertBefore(
@@ -4666,8 +4859,13 @@ class LinesTileComponent {
             screenRow: tileStartRow + newScreenLineIndex,
             lineDecoration: lineDecorations[newScreenLineIndex],
             textDecorations: textDecorations[newScreenLineIndex],
+            inlayDecorations: inlayDecorations
+              ? inlayDecorations[newScreenLineIndex]
+              : null,
             displayLayer,
             nodePool,
+            inlayResizeObserver,
+            horizontalPixelPositionsByScreenLineId,
             lineComponentsByScreenLineId
           });
           this.element.insertBefore(
@@ -4829,6 +5027,20 @@ class LinesTileComponent {
         return true;
     }
 
+    const oldInlayDecorations = oldProps.inlayDecorations || [];
+    const newInlayDecorations = newProps.inlayDecorations || [];
+    if (oldInlayDecorations.length !== newInlayDecorations.length)
+      return true;
+    for (let i = 0; i < oldInlayDecorations.length; i++) {
+      if (
+        !inlayDecorationsEqual(
+          oldInlayDecorations[i],
+          newInlayDecorations[i]
+        )
+      )
+        return true;
+    }
+
     return false;
   }
 }
@@ -4846,6 +5058,11 @@ class LineComponent {
     this.element = nodePool.getElement('DIV', this.buildClassName(), null);
     this.element.dataset.screenRow = screenRow;
     this.textNodes = [];
+    // Inlay wrappers rendered as direct children of this.element, outside
+    // the syntax-scope span tree, along with the column-keyed lookup used
+    // to place the caret to the correct side of them.
+    this.inlayWrappers = [];
+    this.inlayCaretAnchors = new Map();
 
     if (offScreen) {
       this.element.style.position = 'absolute';
@@ -4868,15 +5085,30 @@ class LineComponent {
       this.element.dataset.screenRow = newProps.screenRow;
     }
 
-    if (
-      !textDecorationsEqual(
-        this.props.textDecorations,
-        newProps.textDecorations
-      )
-    ) {
+    const textDecorationsChanged = !textDecorationsEqual(
+      this.props.textDecorations,
+      newProps.textDecorations
+    );
+    const inlayDecorationsChanged = !inlayDecorationsEqual(
+      this.props.inlayDecorations,
+      newProps.inlayDecorations
+    );
+
+    if (textDecorationsChanged || inlayDecorationsChanged) {
       this.props.textDecorations = newProps.textDecorations;
-      this.element.firstChild.remove();
+      this.props.inlayDecorations = newProps.inlayDecorations;
+      this.detachInlayItems();
+      while (this.element.firstChild) this.element.firstChild.remove();
       this.appendContents();
+
+      // Inlays shift where later columns land on screen, but the screen
+      // line itself (and its id) hasn't changed, so nothing else would
+      // invalidate any already-cached horizontal pixel positions for it.
+      if (inlayDecorationsChanged && this.props.horizontalPixelPositionsByScreenLineId) {
+        this.props.horizontalPixelPositionsByScreenLineId.delete(
+          this.props.screenLine.id
+        );
+      }
     }
   }
 
@@ -4887,18 +5119,60 @@ class LineComponent {
       lineComponentsByScreenLineId.delete(screenLine.id);
     }
 
+    // Pull inlay items out before the element (and everything still nested
+    // in it) is handed back to the node pool, so a package's widget never
+    // gets recycled as a plain DOM node.
+    this.detachInlayItems();
     this.element.remove();
     nodePool.release(this.element);
   }
 
+  // Stops observing every inlay item this line rendered, and removes each
+  // one from its wrapper if it's still there. An item can already be gone
+  // from its wrapper by the time this runs, e.g. when the same update cycle
+  // moved it into a replacement LineComponent for the same screen line;
+  // `wrapper.appendChild` in that other line's appendContents() already
+  // reparented it, so there is nothing left to detach here.
+  detachInlayItems() {
+    if (this.inlayWrappers.length === 0) return;
+
+    const { inlayResizeObserver } = this.props;
+    for (let i = 0; i < this.inlayWrappers.length; i++) {
+      const { wrapper, element } = this.inlayWrappers[i];
+      if (inlayResizeObserver) inlayResizeObserver.unobserve(element);
+      if (element.parentNode === wrapper) element.remove();
+    }
+    this.inlayWrappers.length = 0;
+    this.inlayCaretAnchors.clear();
+  }
+
   appendContents() {
-    const { displayLayer, nodePool, screenLine, textDecorations } = this.props;
+    const {
+      displayLayer,
+      nodePool,
+      screenLine,
+      textDecorations,
+      inlayDecorations
+    } = this.props;
 
     this.textNodes.length = 0;
+    const inlays = inlayDecorations || EMPTY_INLAY_DECORATIONS;
 
     const { lineText, tags } = screenLine;
-    let openScopeNode = nodePool.getElement('SPAN', null, null);
-    this.element.appendChild(openScopeNode);
+
+    // Mirrors the live DOM chain of open scope spans as a stack of class
+    // names, so the chain can be rebuilt identically after an inlay
+    // decoration interrupts it (see flushInlaysAtColumn).
+    const scopeClassNames = [];
+    let inlayIndex = 0;
+    let openScopeNode;
+    ({ openScopeNode, inlayIndex } = this.flushInlaysAtColumn(
+      0,
+      inlays,
+      inlayIndex,
+      nodePool,
+      scopeClassNames
+    ));
 
     let decorationIndex = 0;
     let column = 0;
@@ -4919,42 +5193,71 @@ class LineComponent {
       if (tag !== 0) {
         if (displayLayer.isCloseTag(tag)) {
           openScopeNode = openScopeNode.parentElement;
+          scopeClassNames.pop();
         } else if (displayLayer.isOpenTag(tag)) {
-          const newScopeNode = nodePool.getElement(
-            'SPAN',
-            displayLayer.classNameForTag(tag),
-            null
-          );
+          const className = displayLayer.classNameForTag(tag);
+          const newScopeNode = nodePool.getElement('SPAN', className, null);
           openScopeNode.appendChild(newScopeNode);
           openScopeNode = newScopeNode;
+          scopeClassNames.push(className);
         } else {
           const nextTokenColumn = column + tag;
-          while (nextDecoration && nextDecoration.column <= nextTokenColumn) {
-            const text = lineText.substring(column, nextDecoration.column);
-            this.appendTextNode(
-              openScopeNode,
-              text,
-              activeClassName,
-              activeStyle
-            );
-            column = nextDecoration.column;
-            activeClassName = nextDecoration.className;
-            activeStyle = nextDecoration.style;
-            nextDecoration = textDecorations[++decorationIndex];
-          }
 
-          if (column < nextTokenColumn) {
-            const text = lineText.substring(column, nextTokenColumn);
-            this.appendTextNode(
-              openScopeNode,
-              text,
-              activeClassName,
-              activeStyle
+          while (column < nextTokenColumn) {
+            const nextInlayColumn =
+              inlayIndex < inlays.length ? inlays[inlayIndex].column : Infinity;
+            const nextDecorationColumn = nextDecoration
+              ? nextDecoration.column
+              : Infinity;
+            const stopColumn = Math.min(
+              nextTokenColumn,
+              nextDecorationColumn,
+              nextInlayColumn
             );
-            column = nextTokenColumn;
+
+            if (stopColumn > column) {
+              const text = lineText.substring(column, stopColumn);
+              this.appendTextNode(
+                openScopeNode,
+                text,
+                activeClassName,
+                activeStyle
+              );
+              column = stopColumn;
+            }
+
+            if (nextDecoration && nextDecoration.column === column) {
+              activeClassName = nextDecoration.className;
+              activeStyle = nextDecoration.style;
+              nextDecoration = textDecorations[++decorationIndex];
+            }
+
+            if (
+              inlayIndex < inlays.length &&
+              inlays[inlayIndex].column === column
+            ) {
+              ({ openScopeNode, inlayIndex } = this.flushInlaysAtColumn(
+                column,
+                inlays,
+                inlayIndex,
+                nodePool,
+                scopeClassNames
+              ));
+            }
           }
         }
       }
+    }
+
+    // Flush inlays anchored past the last tag, e.g. at the end of the line.
+    if (inlayIndex < inlays.length && inlays[inlayIndex].column === column) {
+      ({ openScopeNode, inlayIndex } = this.flushInlaysAtColumn(
+        column,
+        inlays,
+        inlayIndex,
+        nodePool,
+        scopeClassNames
+      ));
     }
 
     if (column === 0) {
@@ -4971,6 +5274,59 @@ class LineComponent {
       this.element.appendChild(textNode);
       this.textNodes.push(textNode);
     }
+  }
+
+  // Inserts every inlay decoration anchored at `column` (already sorted:
+  // before-inlays first, then after-inlays, both by "order" then creation
+  // order) as direct children of this.element, isolated from the syntax
+  // scope spans so their appearance never depends on the token they sit in.
+  // Then starts a fresh top-level scope span and replays `scopeClassNames`
+  // into it, so text emitted afterwards keeps highlighting correctly.
+  flushInlaysAtColumn(column, inlays, inlayIndex, nodePool, scopeClassNames) {
+    let lastWrapper = null;
+    let firstAfterWrapper = null;
+
+    while (inlayIndex < inlays.length && inlays[inlayIndex].column === column) {
+      const inlay = inlays[inlayIndex];
+      const className =
+        'inlay-decoration' + (inlay.className ? ' ' + inlay.className : '');
+      const wrapper = nodePool.getElement('SPAN', className, null);
+      wrapper.appendChild(inlay.element);
+      this.element.appendChild(wrapper);
+
+      if (this.props.inlayResizeObserver) {
+        this.props.inlayResizeObserver.observe(inlay.element);
+      }
+      this.inlayWrappers.push({
+        wrapper,
+        element: inlay.element,
+        column: inlay.column,
+        after: inlay.after
+      });
+
+      if (inlay.after && !firstAfterWrapper) firstAfterWrapper = wrapper;
+      lastWrapper = wrapper;
+      inlayIndex++;
+    }
+
+    if (lastWrapper) {
+      this.inlayCaretAnchors.set(
+        column,
+        firstAfterWrapper
+          ? { element: firstAfterWrapper, edge: 'left' }
+          : { element: lastWrapper, edge: 'right' }
+      );
+    }
+
+    let openScopeNode = nodePool.getElement('SPAN', null, null);
+    this.element.appendChild(openScopeNode);
+    for (let i = 0; i < scopeClassNames.length; i++) {
+      const child = nodePool.getElement('SPAN', scopeClassNames[i], null);
+      openScopeNode.appendChild(child);
+      openScopeNode = child;
+    }
+
+    return { openScopeNode, inlayIndex };
   }
 
   appendTextNode(openScopeNode, text, activeClassName, activeStyle) {
@@ -5509,6 +5865,37 @@ function rectRelativeToOrigin(rect, origin) {
   };
 }
 
+
+// Orders inlays at the same screen row: by column, then before-inlays
+// before after-inlays, then by "order", breaking ties with "id" (creation
+// order), mirroring how block decorations at the same row are ordered.
+function compareInlays(a, b) {
+  if (a.column !== b.column) return a.column - b.column;
+  if (a.after !== b.after) return a.after ? 1 : -1;
+  const aOrder = a.order == null ? Infinity : a.order;
+  const bOrder = b.order == null ? Infinity : b.order;
+  if (aOrder !== bOrder) return aOrder - bOrder;
+  return a.id - b.id;
+}
+
+function inlayDecorationsEqual(oldInlays, newInlays) {
+  if (!oldInlays && !newInlays) return true;
+  if (!oldInlays || !newInlays) return false;
+  if (oldInlays.length !== newInlays.length) return false;
+  for (let i = 0; i < oldInlays.length; i++) {
+    const a = oldInlays[i];
+    const b = newInlays[i];
+    if (
+      a.column !== b.column ||
+      a.after !== b.after ||
+      a.element !== b.element ||
+      a.className !== b.className
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
 
 function textDecorationsEqual(oldDecorations, newDecorations) {
   if (!oldDecorations && newDecorations) return false;

@@ -3997,6 +3997,268 @@ describe('TextEditorComponent', () => {
     }
   });
 
+  describe('inlay decorations', () => {
+    function createInlayDecoration(
+      editor,
+      range,
+      { width, height, position, order, invalidate } = {}
+    ) {
+      const marker = editor.markBufferRange(range, {
+        invalidate: invalidate || 'never'
+      });
+      const item = document.createElement('div');
+      item.style.display = 'inline-block';
+      item.style.width = (width != null ? width : 30) + 'px';
+      item.style.height = (height != null ? height : 10) + 'px';
+      const decoration = editor.decorateMarker(marker, {
+        type: 'inlay',
+        item,
+        position,
+        order
+      });
+      return { item, decoration, marker };
+    }
+
+    it('renders a before-inlay just before the marker start, and an after-inlay just after the marker end', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item: beforeItem } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'before' }
+      );
+      const { item: afterItem } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 8]],
+        { position: 'after' }
+      );
+      await component.getNextUpdatePromise();
+
+      const lineNode = lineNodeForScreenRow(component, 0);
+      expect(lineNode.contains(beforeItem)).toBe(true);
+      expect(lineNode.contains(afterItem)).toBe(true);
+      expect(
+        beforeItem.compareDocumentPosition(afterItem) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).not.toBe(0);
+
+      const lineText = editor.lineTextForScreenRow(0);
+      const textOnly = Array.from(lineNode.childNodes)
+        .filter(
+          node =>
+            !(node.classList && node.classList.contains('inlay-decoration'))
+        )
+        .map(node => node.textContent)
+        .join('');
+      expect(textOnly).toBe(lineText);
+    });
+
+    it("doesn't grow the row height when the inlay item is taller than a line", async () => {
+      const { component, editor } = buildComponent();
+      const lineHeightBefore = component.getLineHeight();
+
+      createInlayDecoration(editor, [[0, 4], [0, 4]], {
+        position: 'after',
+        height: 200
+      });
+      await component.getNextUpdatePromise();
+
+      const lineNode = lineNodeForScreenRow(component, 0);
+      expect(lineNode.getBoundingClientRect().height).toBeNear(
+        lineHeightBefore
+      );
+      expect(component.getLineHeight()).toBe(lineHeightBefore);
+      assertLinesAreAlignedWithLineNumbersInline(component);
+    });
+
+    it('pushes the text after an inlay to the right by the width of the item', async () => {
+      const { component, editor } = buildComponent();
+
+      const originalLeft = component.pixelPositionForScreenPosition([0, 8])
+        .left;
+
+      const { item } = createInlayDecoration(editor, [[0, 4], [0, 4]], {
+        position: 'before',
+        width: 40
+      });
+      await component.getNextUpdatePromise();
+
+      const newLeft = component.pixelPositionForScreenPosition([0, 8]).left;
+      expect(newLeft - originalLeft).toBeNear(item.offsetWidth);
+    });
+
+    it('places the caret to the right of before-inlays and to the left of after-inlays at the same column', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item: beforeItem } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'before', width: 20 }
+      );
+      const { item: afterItem } = createInlayDecoration(
+        editor,
+        [[0, 0], [0, 4]],
+        { position: 'after', width: 30 }
+      );
+      await component.getNextUpdatePromise();
+
+      const caretLeft = component.pixelPositionForScreenPosition([0, 4]).left;
+      const lineLeft = lineNodeForScreenRow(component, 0).getBoundingClientRect()
+        .left;
+      const beforeRight = beforeItem.getBoundingClientRect().right - lineLeft;
+      const afterLeft = afterItem.getBoundingClientRect().left - lineLeft;
+
+      expect(caretLeft).toBeNear(beforeRight);
+      expect(caretLeft).toBeNear(afterLeft);
+    });
+
+    it('orders same-column inlays by "order" then by creation order, before-inlays first', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item: item1 } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'before', order: 2 }
+      );
+      const { item: item2 } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'before', order: 1 }
+      );
+      const { item: item3 } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'after' }
+      );
+      await component.getNextUpdatePromise();
+
+      const lineNode = lineNodeForScreenRow(component, 0);
+      const domOrder = Array.from(lineNode.querySelectorAll('.inlay-decoration'))
+        .map(wrapper => wrapper.firstChild);
+      expect(domOrder).toEqual([item2, item1, item3]);
+    });
+
+    it('removes the item when the decoration is destroyed', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item, decoration } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'after' }
+      );
+      await component.getNextUpdatePromise();
+      expect(document.contains(item)).toBe(true);
+
+      decoration.destroy();
+      await component.getNextUpdatePromise();
+      expect(document.contains(item)).toBe(false);
+    });
+
+    it('moves the item along with the marker', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item, marker } = createInlayDecoration(
+        editor,
+        [[0, 4], [0, 4]],
+        { position: 'after' }
+      );
+      await component.getNextUpdatePromise();
+      expect(lineNodeForScreenRow(component, 0).contains(item)).toBe(true);
+      expect(lineNodeForScreenRow(component, 1).contains(item)).toBe(false);
+
+      marker.setHeadBufferPosition([1, 2]);
+      marker.setTailBufferPosition([1, 2]);
+      await component.getNextUpdatePromise();
+      expect(lineNodeForScreenRow(component, 0).contains(item)).toBe(false);
+      expect(lineNodeForScreenRow(component, 1).contains(item)).toBe(true);
+    });
+
+    it('does not leave the item in a pooled node when its row scrolls out of view and back', async () => {
+      const editor = buildEditor({ autoHeight: false });
+      const { component, element } = buildComponent({ editor, rowsPerTile: 3 });
+      element.style.height = 4 * component.getLineHeight() + 'px';
+      await component.getNextUpdatePromise();
+
+      const { item } = createInlayDecoration(editor, [[0, 4], [0, 4]], {
+        position: 'after'
+      });
+      await component.getNextUpdatePromise();
+      expect(item.parentElement).not.toBeNull();
+
+      await setScrollTop(component, 15 * component.getLineHeight());
+      await component.getNextUpdatePromise();
+      expect(item.parentElement).toBeNull();
+
+      await setScrollTop(component, 0);
+      await component.getNextUpdatePromise();
+      expect(lineNodeForScreenRow(component, 0).contains(item)).toBe(true);
+    });
+
+    it('updates horizontal pixel positions after the item is resized', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item } = createInlayDecoration(editor, [[0, 4], [0, 4]], {
+        position: 'before',
+        width: 20
+      });
+      await component.getNextUpdatePromise();
+
+      const leftBefore = component.pixelPositionForScreenPosition([0, 6]).left;
+
+      item.style.width = '60px';
+      await component.getNextUpdatePromise();
+
+      const leftAfter = component.pixelPositionForScreenPosition([0, 6]).left;
+      expect(leftAfter - leftBefore).toBeNear(40);
+    });
+
+    it('does not move the cursor when clicking on an inlay decoration', async () => {
+      const { component, editor } = buildComponent();
+
+      const { item } = createInlayDecoration(editor, [[4, 0], [4, 0]], {
+        position: 'after'
+      });
+      await component.getNextUpdatePromise();
+
+      const itemClientRect = item.getBoundingClientRect();
+      component.didMouseDownOnContent({
+        target: item,
+        detail: 1,
+        button: 0,
+        clientX: itemClientRect.left,
+        clientY: itemClientRect.top
+      });
+      expect(editor.getCursorScreenPosition()).toEqual([0, 0]);
+    });
+
+    it('keeps the inlay wrapper as a direct child of the line, isolated from syntax scope spans', async () => {
+      const { component, editor } = buildComponent();
+      editor.setText('const x = 1;');
+      await component.getNextUpdatePromise();
+
+      const { item } = createInlayDecoration(editor, [[0, 5], [0, 5]], {
+        position: 'after'
+      });
+      await component.getNextUpdatePromise();
+
+      const wrapper = item.parentElement;
+      expect(wrapper.classList.contains('inlay-decoration')).toBe(true);
+      expect(wrapper.parentElement).toBe(lineNodeForScreenRow(component, 0));
+    });
+
+    function assertLinesAreAlignedWithLineNumbersInline(component) {
+      const startRow = component.getRenderedStartRow();
+      const endRow = component.getRenderedEndRow();
+      for (let row = startRow; row < endRow; row++) {
+        const lineNode = lineNodeForScreenRow(component, row);
+        const lineNumberNode = lineNumberNodeForScreenRow(component, row);
+        expect(lineNumberNode.getBoundingClientRect().top).toBeNear(
+          lineNode.getBoundingClientRect().top
+        );
+      }
+    }
+  });
+
   describe('cursor decorations', () => {
     it('allows default cursors to be customized', async () => {
       const { component, element, editor } = buildComponent();

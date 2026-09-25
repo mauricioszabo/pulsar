@@ -111,6 +111,18 @@ atom-text-editor {
     }
   }
 
+  // Inlay decorations render on the same screen row as their marker,
+  // pushing the surrounding text horizontally. They sit as direct children
+  // of `.line`, outside any syntax-highlighting scope span, and their
+  // height is clamped so a tall item never grows the row.
+  .line .inlay-decoration {
+    display: inline-block;
+    vertical-align: top;
+    max-height: 1lh;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
   .fold-marker {
     contain: @contain_all;
     cursor: default;

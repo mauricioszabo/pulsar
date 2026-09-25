@@ -2770,6 +2770,12 @@ module.exports = class TextEditor {
   // * __block__: Positions the view associated with the given item before or
   //     after the row of the given {DisplayMarker}, depending on the `position` property.
   //     Block decorations at the same screen row are ordered by their `order` property.
+  // * __inlay__: Like `block`, but positions the view inline, on the same screen
+  //     row as the marker, pushing the surrounding text horizontally instead of
+  //     the following rows vertically. Depending on the `position` property, the
+  //     view is placed just before the marker's start or just after its end. Its
+  //     height is clamped to a single row, and inlay decorations at the same
+  //     column are ordered by their `order` property, same as `block`.
   // * __cursor__: Render a cursor at the head of the {DisplayMarker}. If multiple cursor decorations
   //     are created for the same marker, their class strings and style objects are combined
   //     into a single cursor. This decoration type may be used to style existing cursors
@@ -2784,13 +2790,13 @@ module.exports = class TextEditor {
   //   * `type` Determines the behavior and appearance of this {Decoration}. Supported decoration types
   //     and their uses are listed above.
   //   * `class` This CSS class will be applied to the decorated line number,
-  //     line, text spans, highlight regions, cursors, or overlay.
+  //     line, text spans, highlight regions, cursors, overlay, or inlay wrapper.
   //   * `style` An {Object} containing CSS style properties to apply to the
   //     relevant DOM node. Currently this only works with a `type` of `cursor`
   //     or `text`.
   //   * `item` (optional) An {HTMLElement} or a model {Object} with a
   //     corresponding view registered. Only applicable to the `gutter`,
-  //     `overlay` and `block` decoration types.
+  //     `overlay`, `block` and `inlay` decoration types.
   //   * `onlyHead` (optional) If `true`, the decoration will only be applied to
   //     the head of the `DisplayMarker`. Only applicable to the `line` and
   //     `line-number` decoration types.
@@ -2804,13 +2810,16 @@ module.exports = class TextEditor {
   //     to the last row of a non-empty range, even if it ends at column 0.
   //     Defaults to `true`. Only applicable to the `gutter`, `line`, and
   //     `line-number` decoration types.
-  //   * `position` (optional) Only applicable to decorations of type `overlay` and `block`.
-  //     Controls where the view is positioned relative to the `TextEditorMarker`.
-  //     Values can be `'head'` (the default) or `'tail'` for overlay decorations, and
-  //     `'before'` (the default) or `'after'` for block decorations.
-  //   * `order` (optional) Only applicable to decorations of type `block`. Controls
-  //      where the view is positioned relative to other block decorations at the
-  //      same screen row. If unspecified, block decorations render oldest to newest.
+  //   * `position` (optional) Only applicable to decorations of type `overlay`,
+  //     `block` and `inlay`. Controls where the view is positioned relative to
+  //     the `TextEditorMarker`. Values can be `'head'` (the default) or `'tail'`
+  //     for overlay decorations, `'before'` (the default) or `'after'` for block
+  //     decorations, and `'before'` (the default, anchored to the marker's start)
+  //     or `'after'` (anchored to the marker's end) for inlay decorations.
+  //   * `order` (optional) Only applicable to decorations of type `block` and
+  //      `inlay`. Controls where the view is positioned relative to other block
+  //      or inlay decorations at the same screen row (or, for inlays, the same
+  //      column). If unspecified, decorations render oldest to newest.
   //   * `avoidOverflow` (optional) Only applicable to decorations of type
   //      `overlay`. Determines whether the decoration adjusts its horizontal or
   //      vertical position to remain fully visible when it would otherwise

@@ -156,4 +156,31 @@ describe('DecorationManager', function() {
         expect(layer1MarkerDecoration.getProperties().class).toBe('one');
       });
     }));
+
+  describe('when decorating with the "inlay" type', function() {
+    let [layer1Marker] = [];
+
+    beforeEach(
+      () => (layer1Marker = markerLayer1.markBufferRange([[1, 0], [1, 0]]))
+    );
+
+    it('creates a decoration of "inlay" type that is retrievable via getDecorations', function() {
+      const item = document.createElement('div');
+      const decorationProperties = {
+        type: 'inlay',
+        item,
+        position: 'after'
+      };
+      const layer1MarkerDecoration = decorationManager.decorateMarker(
+        layer1Marker,
+        decorationProperties
+      );
+
+      expect(layer1MarkerDecoration.isType('inlay')).toBe(true);
+      expect(layer1MarkerDecoration.isType('block')).toBe(false);
+      expect(
+        decorationManager.getDecorations({ type: 'inlay' })
+      ).toEqual([layer1MarkerDecoration]);
+    });
+  });
 });
