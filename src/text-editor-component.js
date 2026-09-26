@@ -405,6 +405,7 @@ module.exports = class TextEditorComponent {
     this.queryExtraScreenLinesToRender();
     this.shouldRenderDummyScrollbars = !this.remeasureScrollbars;
     etch.updateSync(this);
+    this.destroyUnrenderedLineComponents();
     this.updateClassList();
     this.shouldRenderDummyScrollbars = true;
     this.didMeasureVisibleBlockDecoration = false;
@@ -684,7 +685,9 @@ module.exports = class TextEditorComponent {
             blockDecorations: this.decorationsToRender.blocks.get(tileStartRow),
             displayLayer: this.props.model.displayLayer,
             nodePool: this.lineNodesPool,
-            lineComponentsByScreenLineId
+            lineComponentsByScreenLineId,
+            renderPlanHTML: this.renderPlanHTML,
+            replacedScreenLineIds: this.replacedScreenLineIds
           })
         );
       }
@@ -915,12 +918,49 @@ module.exports = class TextEditorComponent {
   }
 
   queryScreenLinesToRender() {
-    const { model } = this.props;
+    const { displayLayer } = this.props.model;
+    if (!this.renderPlanner || this.renderPlanner.displayLayer !== displayLayer) {
+      if (this.renderPlanner) this.renderPlanner.destroy();
+      this.renderPlanner = displayLayer.createRenderPlanner();
+    }
 
-    this.renderedScreenLines = model.displayLayer.getScreenLines(
+    const plan = this.renderPlanner.buildRenderPlan(
       this.getRenderedStartRow(),
       this.getRenderedEndRow()
     );
+    this.renderedScreenLines = plan.screenLines;
+    this.applyRenderPlan(plan);
+  }
+
+  // The native render plan says which lines left the viewport, which lines
+  // replaced others in place, and holds the HTML of every new line. Removed
+  // lines are released here; the tiles use the rest when they update.
+  applyRenderPlan({ ops, htmlByScreenLineId }) {
+    this.renderPlanHTML = htmlByScreenLineId;
+    this.replacedScreenLineIds = new Map();
+    for (let i = 0; i < ops.length; i += 4) {
+      const op = ops[i];
+      if (op === RENDER_OP_REMOVE) {
+        const lineComponent = this.lineComponentsByScreenLineId.get(ops[i + 1]);
+        if (lineComponent && !lineComponent.props.offScreen) lineComponent.destroy();
+      } else if (op === RENDER_OP_REPLACE) {
+        this.replacedScreenLineIds.set(ops[i + 1], ops[i + 3]);
+      }
+    }
+  }
+
+  // Safety net for lines the plan did not account for (e.g. when tiles were
+  // not rendered while the plan advanced).
+  destroyUnrenderedLineComponents() {
+    const renderedIds = new Set();
+    for (let i = 0; i < this.renderedScreenLines.length; i++) {
+      renderedIds.add(this.renderedScreenLines[i].id);
+    }
+    this.lineComponentsByScreenLineId.forEach((lineComponent, id) => {
+      if (!lineComponent.props.offScreen && !renderedIds.has(id)) {
+        lineComponent.destroy();
+      }
+    });
   }
 
   queryLongestLine() {
@@ -4480,26 +4520,23 @@ class CursorsAndInputComponent {
 class LinesTileComponent {
   constructor(props) {
     this.props = props;
+    this.lineComponents = [];
     etch.initialize(this);
-    this.createLines();
-    this.updateBlockDecorations({}, props);
+    this.updateLines();
   }
 
   update(newProps) {
     if (this.shouldUpdate(newProps)) {
-      const oldProps = this.props;
       this.props = newProps;
       etch.updateSync(this);
-      if (!newProps.measuredContent) {
-        this.updateLines(oldProps, newProps);
-        this.updateBlockDecorations(oldProps, newProps);
-      }
+      if (!newProps.measuredContent) this.updateLines();
     }
   }
 
   destroy() {
     for (let i = 0; i < this.lineComponents.length; i++) {
-      this.lineComponents[i].destroy();
+      const lineComponent = this.lineComponents[i];
+      if (lineComponent.tile === this) lineComponent.destroy();
     }
     this.lineComponents.length = 0;
 
@@ -4523,256 +4560,104 @@ class LinesTileComponent {
     );
   }
 
-  createLines() {
+  // Applies the render plan to this tile's rows: kept and moved lines reuse
+  // their components (moved ones may come from another tile), replaced lines
+  // reuse the node of the line they replace, and new lines are built from the
+  // plan's HTML. The DOM is then put in order with as few moves as possible.
+  updateLines() {
     const {
-      tileStartRow,
       screenLines,
+      tileStartRow,
       lineDecorations,
       textDecorations,
       nodePool,
       displayLayer,
-      lineComponentsByScreenLineId
+      lineComponentsByScreenLineId,
+      renderPlanHTML,
+      replacedScreenLineIds
     } = this.props;
 
-    this.lineComponents = [];
-    for (let i = 0, length = screenLines.length; i < length; i++) {
-      const component = new LineComponent({
-        screenLine: screenLines[i],
+    const lineComponents = new Array(screenLines.length);
+    for (let i = 0; i < screenLines.length; i++) {
+      const screenLine = screenLines[i];
+      const lineProps = {
         screenRow: tileStartRow + i,
         lineDecoration: lineDecorations[i],
-        textDecorations: textDecorations[i],
-        displayLayer,
-        nodePool,
-        lineComponentsByScreenLineId
-      });
-      this.element.appendChild(component.element);
-      this.lineComponents.push(component);
-    }
-  }
+        textDecorations: textDecorations[i]
+      };
 
-  updateLines(oldProps, newProps) {
-    const {
-      screenLines,
-      tileStartRow,
-      lineDecorations,
-      textDecorations,
-      nodePool,
-      displayLayer,
-      lineComponentsByScreenLineId
-    } = newProps;
+      let lineComponent = lineComponentsByScreenLineId.get(screenLine.id);
+      if (lineComponent && (lineComponent.destroyed || lineComponent.props.offScreen)) {
+        lineComponent = null;
+      }
 
-    const oldScreenLines = oldProps.screenLines;
-    const newScreenLines = screenLines;
-    const oldScreenLinesEndIndex = oldScreenLines.length;
-    const newScreenLinesEndIndex = newScreenLines.length;
-    let oldScreenLineIndex = 0;
-    let newScreenLineIndex = 0;
-    let lineComponentIndex = 0;
-
-    while (
-      oldScreenLineIndex < oldScreenLinesEndIndex ||
-      newScreenLineIndex < newScreenLinesEndIndex
-    ) {
-      const oldScreenLine = oldScreenLines[oldScreenLineIndex];
-      const newScreenLine = newScreenLines[newScreenLineIndex];
-
-      if (oldScreenLineIndex >= oldScreenLinesEndIndex) {
-        var newScreenLineComponent = new LineComponent({
-          screenLine: newScreenLine,
-          screenRow: tileStartRow + newScreenLineIndex,
-          lineDecoration: lineDecorations[newScreenLineIndex],
-          textDecorations: textDecorations[newScreenLineIndex],
-          displayLayer,
-          nodePool,
-          lineComponentsByScreenLineId
-        });
-        this.element.appendChild(newScreenLineComponent.element);
-        this.lineComponents.push(newScreenLineComponent);
-
-        newScreenLineIndex++;
-        lineComponentIndex++;
-      } else if (newScreenLineIndex >= newScreenLinesEndIndex) {
-        this.lineComponents[lineComponentIndex].destroy();
-        this.lineComponents.splice(lineComponentIndex, 1);
-
-        oldScreenLineIndex++;
-      } else if (oldScreenLine === newScreenLine) {
-        const lineComponent = this.lineComponents[lineComponentIndex];
-        lineComponent.update({
-          screenRow: tileStartRow + newScreenLineIndex,
-          lineDecoration: lineDecorations[newScreenLineIndex],
-          textDecorations: textDecorations[newScreenLineIndex]
-        });
-
-        oldScreenLineIndex++;
-        newScreenLineIndex++;
-        lineComponentIndex++;
+      if (lineComponent) {
+        lineComponent.update(lineProps);
       } else {
-        const oldScreenLineIndexInNewScreenLines = newScreenLines.indexOf(
-          oldScreenLine
-        );
-        const newScreenLineIndexInOldScreenLines = oldScreenLines.indexOf(
-          newScreenLine
-        );
-        if (
-          newScreenLineIndex < oldScreenLineIndexInNewScreenLines &&
-          oldScreenLineIndexInNewScreenLines < newScreenLinesEndIndex
-        ) {
-          const newScreenLineComponents = [];
-          while (newScreenLineIndex < oldScreenLineIndexInNewScreenLines) {
-            // eslint-disable-next-line no-redeclare
-            var newScreenLineComponent = new LineComponent({
-              screenLine: newScreenLines[newScreenLineIndex],
-              screenRow: tileStartRow + newScreenLineIndex,
-              lineDecoration: lineDecorations[newScreenLineIndex],
-              textDecorations: textDecorations[newScreenLineIndex],
-              displayLayer,
-              nodePool,
-              lineComponentsByScreenLineId
-            });
-            this.element.insertBefore(
-              newScreenLineComponent.element,
-              this.getFirstElementForScreenLine(oldProps, oldScreenLine)
-            );
-            newScreenLineComponents.push(newScreenLineComponent);
-
-            newScreenLineIndex++;
-          }
-
-          this.lineComponents.splice(
-            lineComponentIndex,
-            0,
-            ...newScreenLineComponents
-          );
-          lineComponentIndex =
-            lineComponentIndex + newScreenLineComponents.length;
-        } else if (
-          oldScreenLineIndex < newScreenLineIndexInOldScreenLines &&
-          newScreenLineIndexInOldScreenLines < oldScreenLinesEndIndex
-        ) {
-          while (oldScreenLineIndex < newScreenLineIndexInOldScreenLines) {
-            this.lineComponents[lineComponentIndex].destroy();
-            this.lineComponents.splice(lineComponentIndex, 1);
-
-            oldScreenLineIndex++;
-          }
+        const html = renderPlanHTML ? renderPlanHTML.get(screenLine.id) : null;
+        const replacedId = replacedScreenLineIds ? replacedScreenLineIds.get(screenLine.id) : null;
+        const replacedComponent = replacedId != null ? lineComponentsByScreenLineId.get(replacedId) : null;
+        if (replacedComponent && !replacedComponent.destroyed && !replacedComponent.props.offScreen) {
+          replacedComponent.replace(screenLine, html, lineProps);
+          lineComponent = replacedComponent;
         } else {
-          const oldScreenLineComponent = this.lineComponents[
-            lineComponentIndex
-          ];
-          // eslint-disable-next-line no-redeclare
-          var newScreenLineComponent = new LineComponent({
-            screenLine: newScreenLines[newScreenLineIndex],
-            screenRow: tileStartRow + newScreenLineIndex,
-            lineDecoration: lineDecorations[newScreenLineIndex],
-            textDecorations: textDecorations[newScreenLineIndex],
+          lineComponent = new LineComponent(Object.assign({
+            screenLine,
             displayLayer,
             nodePool,
-            lineComponentsByScreenLineId
-          });
-          this.element.insertBefore(
-            newScreenLineComponent.element,
-            oldScreenLineComponent.element
-          );
-          oldScreenLineComponent.destroy();
-          this.lineComponents[lineComponentIndex] = newScreenLineComponent;
-
-          oldScreenLineIndex++;
-          newScreenLineIndex++;
-          lineComponentIndex++;
+            lineComponentsByScreenLineId,
+            html
+          }, lineProps));
         }
       }
+
+      lineComponent.tile = this;
+      lineComponents[i] = lineComponent;
     }
+    this.lineComponents = lineComponents;
+    this.arrangeChildren();
   }
 
-  getFirstElementForScreenLine(oldProps, screenLine) {
-    const blockDecorations = oldProps.blockDecorations
-      ? oldProps.blockDecorations.get(screenLine.id)
-      : null;
-    if (blockDecorations) {
-      const blockDecorationElementsBeforeOldScreenLine = [];
-      for (let i = 0; i < blockDecorations.length; i++) {
-        const decoration = blockDecorations[i];
-        if (decoration.position !== 'after') {
-          blockDecorationElementsBeforeOldScreenLine.push(
-            TextEditor.viewForItem(decoration.item)
-          );
+  // Orders line nodes and block decorations, moving only misplaced nodes
+  // (moving a block decoration can reload its content, e.g. iframes).
+  arrangeChildren() {
+    const { blockDecorations } = this.props;
+    const desiredNodes = [];
+    for (let i = 0; i < this.lineComponents.length; i++) {
+      const lineComponent = this.lineComponents[i];
+      const decorations = blockDecorations
+        ? blockDecorations.get(lineComponent.props.screenLine.id)
+        : null;
+      if (decorations) {
+        for (let j = 0; j < decorations.length; j++) {
+          if (decorations[j].position !== 'after') {
+            desiredNodes.push(TextEditor.viewForItem(decorations[j].item));
+          }
         }
-      }
-
-      for (
-        let i = 0;
-        i < blockDecorationElementsBeforeOldScreenLine.length;
-        i++
-      ) {
-        const blockDecorationElement =
-          blockDecorationElementsBeforeOldScreenLine[i];
-        if (
-          !blockDecorationElementsBeforeOldScreenLine.includes(
-            blockDecorationElement.previousSibling
-          )
-        ) {
-          return blockDecorationElement;
+        desiredNodes.push(lineComponent.element);
+        for (let j = 0; j < decorations.length; j++) {
+          if (decorations[j].position === 'after') {
+            desiredNodes.push(TextEditor.viewForItem(decorations[j].item));
+          }
         }
+      } else {
+        desiredNodes.push(lineComponent.element);
       }
     }
 
-    return oldProps.lineComponentsByScreenLineId.get(screenLine.id).element;
-  }
-
-  updateBlockDecorations(oldProps, newProps) {
-    const { blockDecorations, lineComponentsByScreenLineId } = newProps;
-
-    if (oldProps.blockDecorations) {
-      oldProps.blockDecorations.forEach((oldDecorations, screenLineId) => {
-        const newDecorations = newProps.blockDecorations
-          ? newProps.blockDecorations.get(screenLineId)
-          : null;
-        for (let i = 0; i < oldDecorations.length; i++) {
-          const oldDecoration = oldDecorations[i];
-          if (newDecorations && newDecorations.includes(oldDecoration))
-            continue;
-
-          const element = TextEditor.viewForItem(oldDecoration.item);
-          if (element.parentElement !== this.element) continue;
-
-          element.remove();
-        }
-      });
+    let node = this.element.firstChild;
+    for (let i = 0; i < desiredNodes.length; i++) {
+      const desiredNode = desiredNodes[i];
+      if (node === desiredNode) {
+        node = node.nextSibling;
+      } else {
+        this.element.insertBefore(desiredNode, node);
+      }
     }
-
-    if (blockDecorations) {
-      blockDecorations.forEach((newDecorations, screenLineId) => {
-        const oldDecorations = oldProps.blockDecorations
-          ? oldProps.blockDecorations.get(screenLineId)
-          : null;
-        const lineComponent = lineComponentsByScreenLineId.get(screenLineId);
-        // Skip block decorations whose screen line is not in this tile.
-        // This can happen when decorations are destroyed or moved between
-        // tiles during the same update cycle.
-        if (!lineComponent) return;
-        const lineNode = lineComponent.element;
-        let lastAfter = lineNode;
-
-        for (let i = 0; i < newDecorations.length; i++) {
-          const newDecoration = newDecorations[i];
-          const element = TextEditor.viewForItem(newDecoration.item);
-
-          if (oldDecorations && oldDecorations.includes(newDecoration)) {
-            if (newDecoration.position === 'after') {
-              lastAfter = element;
-            }
-            continue;
-          }
-
-          if (newDecoration.position === 'after') {
-            this.element.insertBefore(element, lastAfter.nextSibling);
-            lastAfter = element;
-          } else {
-            this.element.insertBefore(element, lineNode);
-          }
-        }
-      });
+    while (node) {
+      const nextNode = node.nextSibling;
+      node.remove();
+      node = nextNode;
     }
   }
 
@@ -4853,8 +4738,50 @@ class LineComponent {
       this.element.dataset.offScreen = true;
     }
 
-    this.appendContents();
+    this.setContents(props.html);
     lineComponentsByScreenLineId.set(screenLine.id, this);
+  }
+
+  // Reuses this line's node for another screen line (a REPLACE in the render
+  // plan).
+  replace(screenLine, html, props) {
+    const { lineComponentsByScreenLineId } = this.props;
+    if (lineComponentsByScreenLineId.get(this.props.screenLine.id) === this) {
+      lineComponentsByScreenLineId.delete(this.props.screenLine.id);
+    }
+    this.props.screenLine = screenLine;
+    this.props.textDecorations = props.textDecorations;
+    this.props.lineDecoration = props.lineDecoration;
+    this.props.screenRow = props.screenRow;
+    this.element.className = this.buildClassName();
+    this.element.dataset.screenRow = props.screenRow;
+    this.clearContents();
+    this.setContents(html);
+    lineComponentsByScreenLineId.set(screenLine.id, this);
+  }
+
+  // Lines with text decorations are built node by node; everything else uses
+  // the HTML from the render plan when there is one.
+  setContents(html) {
+    const { textDecorations } = this.props;
+    if (html != null && !(textDecorations && textDecorations.length > 0)) {
+      this.textNodes.length = 0;
+      this.element.innerHTML = html;
+      const walker = document.createTreeWalker(this.element, NodeFilter.SHOW_TEXT);
+      let textNode;
+      while ((textNode = walker.nextNode())) this.textNodes.push(textNode);
+    } else {
+      this.appendContents();
+    }
+  }
+
+  clearContents() {
+    const { nodePool } = this.props;
+    let child;
+    while ((child = this.element.firstChild)) {
+      child.remove();
+      nodePool.release(child);
+    }
   }
 
   update(newProps) {
@@ -4875,12 +4802,14 @@ class LineComponent {
       )
     ) {
       this.props.textDecorations = newProps.textDecorations;
-      this.element.firstChild.remove();
+      this.clearContents();
       this.appendContents();
     }
   }
 
   destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     const { nodePool, lineComponentsByScreenLineId, screenLine } = this.props;
 
     if (lineComponentsByScreenLineId.get(screenLine.id) === this) {
@@ -5581,6 +5510,10 @@ function debounce(fn, wait) {
     if (!timeout) timeout = setTimeout(later, wait);
   };
 }
+
+// Operations in a render plan from text-buffer's RenderPlanner.
+const RENDER_OP_REPLACE = 2;
+const RENDER_OP_REMOVE = 4;
 
 class NodePool {
   constructor() {
