@@ -250,6 +250,10 @@ module.exports = class TextEditor {
         tabLength,
         ratioForCharacter: this.ratioForCharacter.bind(this),
         isWrapBoundary,
+        // Let the native display layer compute widths and wrap boundaries
+        // without calling back into JS for every character.
+        characterWidthRatios: this.getCharacterWidthRatios(),
+        wrapBoundaryMode: 'cjk',
         foldCharacter: ZERO_WIDTH_NBSP,
         softWrapHangingIndent:
           params.softWrapHangingIndentLength != null
@@ -5413,6 +5417,19 @@ module.exports = class TextEditor {
     }
   }
 
+  // The ratios `ratioForCharacter` uses, as data for the native display layer.
+  getCharacterWidthRatios() {
+    const defaultCharWidth = this.getDefaultCharWidth();
+    if (!defaultCharWidth) {
+      return { doubleWidth: 1, halfWidth: 1, korean: 1 };
+    }
+    return {
+      doubleWidth: this.getDoubleWidthCharWidth() / defaultCharWidth,
+      halfWidth: this.getHalfWidthCharWidth() / defaultCharWidth,
+      korean: this.getKoreanCharWidth() / defaultCharWidth
+    };
+  }
+
   setDefaultCharWidth(
     defaultCharWidth,
     doubleWidthCharWidth,
@@ -5438,11 +5455,13 @@ module.exports = class TextEditor {
       this.doubleWidthCharWidth = doubleWidthCharWidth;
       this.halfWidthCharWidth = halfWidthCharWidth;
       this.koreanCharWidth = koreanCharWidth;
+      const displayLayerParams = {
+        characterWidthRatios: this.getCharacterWidthRatios()
+      };
       if (this.isSoftWrapped()) {
-        this.displayLayer.reset({
-          softWrapColumn: this.getSoftWrapColumn()
-        });
+        displayLayerParams.softWrapColumn = this.getSoftWrapColumn();
       }
+      this.displayLayer.reset(displayLayerParams);
     }
     return defaultCharWidth;
   }
