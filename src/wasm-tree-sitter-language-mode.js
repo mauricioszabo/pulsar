@@ -321,6 +321,43 @@ class WASMTreeSitterLanguageMode {
     return new Parser();
   }
 
+  // Runs a layer's highlights query for the given range and stores the
+  // resulting scope boundaries in the layer's `ScopeResolver`.
+  resolveHighlights(layer, from, to) {
+    let captures = layer.queries.highlightsQuery?.captures(
+      layer.tree.rootNode,
+      { startPosition: from, endPosition: to }
+    ) ?? [];
+    layer.scopeResolver.reset();
+
+    for (let capture of captures) {
+      let { node } = capture;
+      if (layer.scopeResolver.shouldInvalidateOnChange(capture)) {
+        // This node wants to be invalidated in its entirety whenever a change
+        // happens within it. This setting should be added to a query whenever
+        // (a) a certain node's scope name can change just from its contents
+        // changing, and (b) that node can possibly span more than one line.
+        //
+        // Without this setting, we're liable to invalidate only the line that
+        // a change happened on, because we have no other way of knowing how
+        // significant of a change it is. If we were able to do so, we'd set
+        // this property automatically on any capture that (a) involved a
+        // `#match?` predicate, and (b) started and ended on different lines.
+        layer.nodesToInvalidateOnChange.add(node.id);
+      }
+      // Phantom nodes invented by the parse tree. Indentation captures can use
+      // `allowEmpty` to force these to be considered, but for marking scopes,
+      // there's no need for it; it'd just cause us to open and close a scope
+      // in the same position.
+      if (node.childCount === 0 && node.text === '') { continue; }
+
+      // Ask the `ScopeResolver` to process each capture in turn. Some captures
+      // will be ignored if they fail certain tests, and some will have their
+      // original range altered.
+      layer.scopeResolver.store(capture);
+    }
+  }
+
   getOrCreateParserForLanguage(language) {
     let pool = this.parsersByLanguage.get(language);
     let parser;
@@ -2961,38 +2998,7 @@ class LanguageLayer {
     let boundaries = createTree(compareBoundaries);
     let extent = this.getExtent();
 
-    let captures = this.queries.highlightsQuery?.captures(
-      this.tree.rootNode,
-      { startPosition: from, endPosition: to }
-    ) ?? [];
-    this.scopeResolver.reset();
-
-    for (let capture of captures) {
-      let { node } = capture;
-      if (this.scopeResolver.shouldInvalidateOnChange(capture)) {
-        // This node wants to be invalidated in its entirety whenever a change
-        // happens within it. This setting should be added to a query whenever
-        // (a) a certain node's scope name can change just from its contents
-        // changing, and (b) that node can possibly span more than one line.
-        //
-        // Without this setting, we're liable to invalidate only the line that
-        // a change happened on, because we have no other way of knowing how
-        // significant of a change it is. If we were able to do so, we'd set
-        // this property automatically on any capture that (a) involved a
-        // `#match?` predicate, and (b) started and ended on different lines.
-        this.nodesToInvalidateOnChange.add(node.id);
-      }
-      // Phantom nodes invented by the parse tree. Indentation captures can use
-      // `allowEmpty` to force these to be considered, but for marking scopes,
-      // there's no need for it; it'd just cause us to open and close a scope
-      // in the same position.
-      if (node.childCount === 0 && node.text === '') { continue; }
-
-      // Ask the `ScopeResolver` to process each capture in turn. Some captures
-      // will be ignored if they fail certain tests, and some will have their
-      // original range altered.
-      this.scopeResolver.store(capture);
-    }
+    this.languageMode.resolveHighlights(this, from, to);
 
     // A `HighlightIterator` will want to know which scopes were already open
     // when this range began. Sadly, we also have to keep track of the point in

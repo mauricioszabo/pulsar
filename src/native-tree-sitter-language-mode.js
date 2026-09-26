@@ -1,5 +1,11 @@
 const WASMTreeSitterLanguageMode = require('./wasm-tree-sitter-language-mode');
-const { NativeParser, SyntaxNode, TreeSitterGrammar } = require('./native-tree-sitter');
+const WASMTreeSitterGrammar = require('./wasm-tree-sitter-grammar');
+const {
+  NativeParser,
+  SyntaxNode,
+  TreeSitterGrammar,
+  TreeSitterQuery
+} = require('./native-tree-sitter');
 
 WASMTreeSitterLanguageMode.patchNodePrototype(SyntaxNode.prototype);
 
@@ -49,6 +55,76 @@ class NativeTreeSitterLanguageMode extends WASMTreeSitterLanguageMode {
     }
     return super.createParser(language);
   }
+
+  // Native queries resolve their captures into scope boundaries natively,
+  // the way `ScopeResolver#store` does, in one call.
+  //
+  // Scope ids are looked up once per scope name, so this relies on
+  // `idForScope` ignoring the leaf node text that `ScopeResolver` passes it.
+  // If a grammar overrides it, keep using `ScopeResolver`.
+  resolveHighlights(layer, from, to) {
+    let query = layer.queries.highlightsQuery;
+    if (!(query instanceof TreeSitterQuery) || !this.hasStockIdForScope()) {
+      return super.resolveHighlights(layer, from, to);
+    }
+
+    let { scopeResolver } = layer;
+    scopeResolver.reset();
+    let { boundaries, invalidatedNodeIds, scopeNameCount } = query.highlights(
+      layer.tree.rootNode,
+      {
+        startPosition: from,
+        endPosition: to,
+        injection: layer.depth > 0,
+        config: (key) => scopeResolver.getConfig(key)
+      }
+    );
+    for (let id of invalidatedNodeIds) {
+      layer.nodesToInvalidateOnChange.add(id);
+    }
+
+    let scopeIds = this.scopeIdsForHighlightsQuery(query, scopeNameCount);
+    for (let i = 0; i < boundaries.length;) {
+      let point = scopeResolver._keyForPoint({ row: boundaries[i], column: boundaries[i + 1] });
+      let closeCount = boundaries[i + 2];
+      let openCount = boundaries[i + 3];
+      i += 4;
+      let close = [];
+      for (let end = i + closeCount; i < end; i++) close.push(scopeIds[boundaries[i]]);
+      let open = [];
+      for (let end = i + openCount; i < end; i++) open.push(scopeIds[boundaries[i]]);
+      scopeResolver.boundaries.set(point, { open, close });
+    }
+  }
+
+  hasStockIdForScope() {
+    return this.idForScope === WASMTreeSitterLanguageMode.prototype.idForScope &&
+      this.grammar.idForScope === WASMTreeSitterGrammar.prototype.idForScope;
+  }
+
+  // The scope ids of the scope names a native highlights query's boundaries
+  // refer to (by index). Scope ids belong to the language mode's grammar, and
+  // an injection's query can serve several of them.
+  scopeIdsForHighlightsQuery(query, scopeNameCount) {
+    let idsByQuery = SCOPE_IDS_FOR_GRAMMARS.get(this.grammar);
+    if (!idsByQuery) {
+      idsByQuery = new WeakMap();
+      SCOPE_IDS_FOR_GRAMMARS.set(this.grammar, idsByQuery);
+    }
+    let scopeIds = idsByQuery.get(query);
+    if (!scopeIds) {
+      scopeIds = [];
+      idsByQuery.set(query, scopeIds);
+    }
+    if (scopeIds.length < scopeNameCount) {
+      for (let name of query.highlightScopeNames(scopeIds.length)) {
+        scopeIds.push(this.idForScope(name));
+      }
+    }
+    return scopeIds;
+  }
 }
+
+const SCOPE_IDS_FOR_GRAMMARS = new WeakMap();
 
 module.exports = NativeTreeSitterLanguageMode;
