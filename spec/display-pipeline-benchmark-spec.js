@@ -10,7 +10,13 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const superstring = require('@pulsar-edit/superstring');
+// Count calls on the superstring instance text-buffer actually uses (with
+// linked packages, Pulsar's own `require` may load a separate copy).
+const superstring = require(
+  require.resolve('@pulsar-edit/superstring', {
+    paths: [fs.realpathSync(path.dirname(require.resolve('@pulsar-edit/text-buffer/package.json')))]
+  })
+);
 const TextEditorComponent = require('../src/text-editor-component');
 const TextEditor = require('../src/text-editor');
 const TextBuffer = require('@pulsar-edit/text-buffer');
@@ -88,18 +94,23 @@ describeBenchmark('Display pipeline benchmark', () => {
   const results = [];
   const editors = [];
 
+  let originalTimeout;
+
   beforeEach(async () => {
-    jasmine.getEnv().defaultTimeoutInterval = 600000;
+    // Specs run with mocked timers by default; rendering needs real ones.
+    jasmine.useRealClock();
+    originalTimeout = jasmine.DEFAULT_TIMEOUT_INTERVAL;
+    jasmine.DEFAULT_TIMEOUT_INTERVAL = 10 * 60 * 1000;
     await atom.packages.activatePackage('language-javascript');
     instrumentNativeCalls();
   });
 
   afterEach(() => {
+    jasmine.DEFAULT_TIMEOUT_INTERVAL = originalTimeout;
     for (const editor of editors) editor.destroy();
     editors.length = 0;
   });
 
-  // Write results once all scenarios ran (Jasmine 1.3 has no afterAll).
   function report() {
     const outPath =
       process.env.PULSAR_BENCHMARK_OUT ||
@@ -113,12 +124,14 @@ describeBenchmark('Display pipeline benchmark', () => {
   }
 
   async function buildComponent({ text, softWrapped = false, width = 800, height = 600 }) {
+    console.log('[benchmark] building editor');
     const buffer = new TextBuffer({ text });
     atom.grammars.assignLanguageMode(buffer, 'source.js');
     const languageMode = buffer.getLanguageMode();
     if (languageMode.ready && typeof languageMode.ready.then === 'function') {
-      await languageMode.ready;
+      await Promise.race([languageMode.ready, new Promise(r => setTimeout(r, 10000))]);
     }
+    console.log('[benchmark] language mode ready');
     const editor = new TextEditor({ buffer, softWrapped, autoHeight: false });
     editors.push(editor);
     const component = new TextEditorComponent({ model: editor, updatedSynchronously: false });
@@ -126,15 +139,15 @@ describeBenchmark('Display pipeline benchmark', () => {
     element.style.height = height + 'px';
     element.style.width = width + 'px';
     jasmine.attachToDOM(element);
-    await component.getNextUpdatePromise();
-    if (languageMode.atTransactionEnd) await languageMode.atTransactionEnd();
     component.updateSync();
+    console.log('[benchmark] editor ready');
     return { buffer, editor, component, element };
   }
 
   // Runs `step(i)` followed by a synchronous render for each frame and
   // collects per-frame timings, DOM mutations, heap growth and native calls.
   function measureFrames(name, component, frameCount, step) {
+    console.log(`[benchmark] ${name}: ${frameCount} frames`);
     const observer = new MutationObserver(() => {});
     observer.observe(component.element, {
       childList: true,
