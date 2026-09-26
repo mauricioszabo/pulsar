@@ -62,6 +62,8 @@ function wrapQueryCaptures(QueryPrototype) {
 }
 
 wrapQueryCaptures(Query.prototype);
+// Native Tree-sitter queries accept the old signature too.
+wrapQueryCaptures(require('./native-tree-sitter').TreeSitterQuery.prototype);
 
 // Extended: This class holds an instance of a Tree-sitter grammar.
 module.exports = class WASMTreeSitterGrammar {
@@ -113,6 +115,9 @@ module.exports = class WASMTreeSitterGrammar {
     this.subscriptions = new CompositeDisposable;
 
     this.queryCache = new Map();
+    // The same queries, compiled for native Tree-sitter.
+    this.nativeQueryCache = new Map();
+    this.promisesForNativeQueries = new Map();
     this.promisesForQueryFiles = new Map();
     this.promisesForQueries = new Map();
 
@@ -310,6 +315,7 @@ module.exports = class WASMTreeSitterGrammar {
       if (this[queryType] !== output) {
         this[queryType] = output;
         this.queryCache.delete(queryType);
+        this.nativeQueryCache.delete(queryType);
       }
     }).finally(() => {
       this.promisesForQueryFiles.delete(key);
@@ -402,10 +408,84 @@ module.exports = class WASMTreeSitterGrammar {
     return new Query(this._language, queryContents);
   }
 
+  // Native Tree-sitter (experimental, used by `NativeTreeSitterLanguageMode`
+  // when `core.useExperimentalNativeTreeSitter` is enabled): the same WASM
+  // grammar and query files, run by superstring's native Tree-sitter.
+
+  static NATIVE_LANGUAGE_CACHE = new Map();
+
+  static loadNativeLanguage(grammarPath) {
+    // Cached per path for the same reasons as `loadLanguage`.
+    let promise = this.NATIVE_LANGUAGE_CACHE.get(grammarPath);
+    if (!promise) {
+      const { TreeSitterGrammar } = require('./native-tree-sitter');
+      promise = fs.promises.readFile(grammarPath).then(bytes => new TreeSitterGrammar(bytes));
+      this.NATIVE_LANGUAGE_CACHE.set(grammarPath, promise);
+      promise.catch(() => this.NATIVE_LANGUAGE_CACHE.delete(grammarPath));
+    }
+    return promise;
+  }
+
+  // Returns a {Promise} for this grammar's native Tree-sitter language, once
+  // its query files are loaded too.
+  async getNativeLanguage() {
+    if (!this._nativeLanguage) {
+      try {
+        this._nativeLanguage = await WASMTreeSitterGrammar.loadNativeLanguage(this.treeSitterGrammarPath);
+      } catch (err) {
+        console.error(`Error loading native grammar for ${this.scopeName}; original error follows`);
+        console.error(err);
+        throw err;
+      }
+    }
+    if (!this._queryFilesLoaded) {
+      await this.loadQueryFiles(this.grammarFilePath, this.queryPaths);
+    }
+    return this._nativeLanguage;
+  }
+
+  getNativeLanguageSync() {
+    return this._nativeLanguage;
+  }
+
+  // Like `getQuery`, compiled for native Tree-sitter.
+  getNativeQuery(queryType) {
+    let query = this.nativeQueryCache.get(queryType);
+    if (query) { return Promise.resolve(query); }
+
+    let promise = this.promisesForNativeQueries.get(queryType);
+    if (promise) { return promise; }
+
+    promise = this.getNativeLanguage().then((language) => {
+      const { TreeSitterQuery } = require('./native-tree-sitter');
+      let query = new TreeSitterQuery(language, this[queryType]);
+      this.nativeQueryCache.set(queryType, query);
+      return query;
+    }).finally(() => {
+      this.promisesForNativeQueries.delete(queryType);
+    });
+
+    this.promisesForNativeQueries.set(queryType, promise);
+    return promise;
+  }
+
+  getNativeQuerySync(queryType) {
+    let language = this.getNativeLanguageSync();
+    if (!language) { return null; }
+    let query = this.nativeQueryCache.get(queryType);
+    if (!query) {
+      const { TreeSitterQuery } = require('./native-tree-sitter');
+      query = new TreeSitterQuery(language, this[queryType]);
+      this.nativeQueryCache.set(queryType, query);
+    }
+    return query;
+  }
+
   // Used by the specs to override a particular query for testing.
   async setQueryForTest(queryType, contents) {
     await this.getLanguage();
     this.queryCache.delete(queryType);
+    this.nativeQueryCache.delete(queryType);
     this[queryType] = contents;
     let query = await this.getQuery(queryType);
     this.emitter.emit('did-change-query', { filePath: '', queryType });
@@ -432,6 +512,7 @@ module.exports = class WASMTreeSitterGrammar {
             console.error(error);
             this[queryType] = existingQuery;
             this.queryCache.delete(queryType);
+            this.nativeQueryCache.delete(queryType);
             return;
           }
           this.emitter.emit('did-change-query', { filePath, queryType });
@@ -513,7 +594,9 @@ module.exports = class WASMTreeSitterGrammar {
       value.delete();
     }
     this.queryCache.clear();
+    this.nativeQueryCache.clear();
     this._language = null;
+    this._nativeLanguage = null;
   }
 
   // Extended: Define a set of rules for when this grammar should delegate to a

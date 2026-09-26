@@ -5,6 +5,7 @@ const SecondMate = require('second-mate');
 const { Disposable, CompositeDisposable, Emitter } = require('event-kit');
 const TextMateLanguageMode = require('./text-mate-language-mode');
 const WASMTreeSitterLanguageMode = require('./wasm-tree-sitter-language-mode');
+const NativeTreeSitterLanguageMode = require('./native-tree-sitter-language-mode');
 const WASMTreeSitterGrammar = require('./wasm-tree-sitter-grammar');
 const ScopeDescriptor = require('./scope-descriptor');
 const Token = require('./token');
@@ -51,6 +52,24 @@ module.exports = class GrammarRegistry {
         }
       });
     };
+
+    // Switching between the WASM and native Tree-sitter implementations keeps
+    // each buffer's grammar, so rebuild their language modes directly.
+    let onTreeSitterImplementationChange = () => {
+      this.grammarScoresByBuffer.forEach((_score, buffer) => {
+        let languageMode = buffer.getLanguageMode();
+        if (!(languageMode.grammar instanceof WASMTreeSitterGrammar)) return;
+        let expectedClass = this.treeSitterLanguageModeClass();
+        if (languageMode.constructor === expectedClass) return;
+        buffer.setLanguageMode(
+          this.languageModeForGrammarAndBuffer(languageMode.grammar, buffer)
+        );
+      });
+    };
+
+    this.subscriptions.add(
+      this.config.onDidChange('core.useExperimentalNativeTreeSitter', onTreeSitterImplementationChange)
+    );
 
     this.subscriptions.add(
       this.config.onDidChange('core.useTreeSitterParsers', onLanguageModeChange)
@@ -200,9 +219,16 @@ module.exports = class GrammarRegistry {
     }
   }
 
+  treeSitterLanguageModeClass() {
+    return this.config.get('core.useExperimentalNativeTreeSitter') ?
+      NativeTreeSitterLanguageMode :
+      WASMTreeSitterLanguageMode;
+  }
+
   languageModeForGrammarAndBuffer(grammar, buffer) {
     if (grammar instanceof WASMTreeSitterGrammar) {
-      return new WASMTreeSitterLanguageMode({
+      const LanguageMode = this.treeSitterLanguageModeClass();
+      return new LanguageMode({
         grammar,
         buffer,
         config: this.config,

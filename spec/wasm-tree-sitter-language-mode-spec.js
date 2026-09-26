@@ -8,7 +8,7 @@ const { Point } = TextBuffer;
 const CSON = require('season');
 const TextEditor = require('../src/text-editor');
 const WASMTreeSitterGrammar = require('../src/wasm-tree-sitter-grammar');
-const WASMTreeSitterLanguageMode = require('../src/wasm-tree-sitter-language-mode');
+const WASMTreeSitterLanguageMode = require('./helpers/tree-sitter-language-mode');
 const Random = require('random-seed');
 const { getRandomBufferRange, buildRandomLines } = require('./helpers/random');
 

@@ -11,7 +11,7 @@ const Pane = require('../src/pane');
 const TextEditor = require('../src/text-editor');
 const TextBuffer = require('@pulsar-edit/text-buffer');
 const TextMateLanguageMode = require('../src/text-mate-language-mode');
-const WASMTreeSitterLanguageMode = require('../src/wasm-tree-sitter-language-mode');
+const WASMTreeSitterLanguageMode = require('./helpers/tree-sitter-language-mode');
 
 async function languageModeReady(editor) {
   let languageMode = editor.getBuffer().getLanguageMode();

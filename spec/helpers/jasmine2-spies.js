@@ -47,6 +47,11 @@ exports.register = (jasmineEnv) => {
 
     // reset config before each spec
     atom.config.set("core.destroyEmptyPanes", false);
+    // PULSAR_NATIVE_TREE_SITTER=1 runs the specs with the experimental native
+    // Tree-sitter language mode.
+    if (process.env.PULSAR_NATIVE_TREE_SITTER) {
+      atom.config.set("core.useExperimentalNativeTreeSitter", true);
+    }
     atom.config.set("editor.fontFamily", "Courier");
     atom.config.set("editor.fontSize", 16);
     atom.config.set("editor.autoIndent", false);

@@ -369,6 +369,12 @@ const configSchema = {
         title: 'Use Tree-sitter Parsers',
         description: 'Use Tree-sitter parsers for supported languages.'
       },
+      useExperimentalNativeTreeSitter: {
+        type: 'boolean',
+        default: false,
+        title: 'Use Experimental Native Tree-sitter',
+        description: 'Run Tree-sitter grammars with a native Tree-sitter runtime that parses straight from the buffer, instead of `web-tree-sitter`. Experimental.'
+      },
       useLegacyTreeSitter: {
         type: 'boolean',
         default: false,

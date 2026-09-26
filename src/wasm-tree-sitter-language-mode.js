@@ -255,7 +255,7 @@ class WASMTreeSitterLanguageMode {
     // code organization.
     this.indentResolver = new IndentResolver(this.buffer, this);
 
-    this.ready = this.grammar.getLanguage()
+    this.ready = this.loadLanguageForGrammar(this.grammar)
       .then(language => {
         this.rootLanguage = language;
         this.rootLanguageLayer = new LanguageLayer(null, this, grammar, 0);
@@ -301,6 +301,26 @@ class WASMTreeSitterLanguageMode {
     return this.getOrCreateParserForLanguage(this.rootLanguage);
   }
 
+  // Tree-sitter implementation hooks. `NativeTreeSitterLanguageMode`
+  // overrides these to use superstring's native Tree-sitter instead of
+  // `web-tree-sitter`.
+
+  loadLanguageForGrammar(grammar) {
+    return grammar.getLanguage();
+  }
+
+  getLanguageForGrammarSync(grammar) {
+    return grammar.getLanguageSync();
+  }
+
+  getQueryForGrammar(grammar, queryType) {
+    return grammar.getQuery(queryType);
+  }
+
+  createParser(_language) {
+    return new Parser();
+  }
+
   getOrCreateParserForLanguage(language) {
     let pool = this.parsersByLanguage.get(language);
     let parser;
@@ -309,7 +329,7 @@ class WASMTreeSitterLanguageMode {
     }
 
     if (!parser) {
-      parser = new Parser();
+      parser = this.createParser(language);
       parser.setLanguage(language);
       this.parsersByLanguage.add(language, parser);
     }
@@ -2686,7 +2706,7 @@ class LanguageLayer {
 
     // A constructor can't go async, so all our async administrative tasks hang
     // off this promise. We can `await this.languageLoaded` later on.
-    this.languageLoaded = this.grammar.getLanguage().then(language => {
+    this.languageLoaded = this.languageMode.loadLanguageForGrammar(this.grammar).then(language => {
       this.language = language;
       // All queries are optional. Regular expression language layers, for
       // instance, don't really have a need for any queries other than
@@ -2697,7 +2717,7 @@ class LanguageLayer {
 
       for (let queryType of queries) {
         if (grammar[queryType]) {
-          let promise = this.grammar.getQuery(queryType).then(query => {
+          let promise = this.languageMode.getQueryForGrammar(this.grammar, queryType).then(query => {
             this.queries[queryType] = query;
           }).catch(() => {
             throw new GrammarLoadError(grammar, queryType);
@@ -2838,7 +2858,7 @@ class LanguageLayer {
     if (!this.queries[queryType]) { return; }
     let originalQuery = this.queries[queryType];
     try {
-      let query = await this.grammar.getQuery(queryType);
+      let query = await this.languageMode.getQueryForGrammar(this.grammar, queryType);
       this.queries[queryType] = query;
 
       // Force a re-highlight of this layer's entire region.
@@ -3459,7 +3479,7 @@ class LanguageLayer {
     }
 
     this.patchSinceCurrentParseStarted = new Patch();
-    let language = this.grammar.getLanguageSync();
+    let language = this.languageMode.getLanguageForGrammarSync(this.grammar);
     let tree;
     if (this.languageMode.useAsyncParsing) {
       tree = this.languageMode.parseAsync(
@@ -5615,5 +5635,8 @@ IndentResolver.TESTS = {
     return position.row === comparisonRow;
   }
 }
+
+// Shared with `NativeTreeSitterLanguageMode`, whose nodes need the same additions.
+WASMTreeSitterLanguageMode.patchNodePrototype = patchNodePrototype;
 
 module.exports = WASMTreeSitterLanguageMode;

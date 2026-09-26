@@ -8,7 +8,7 @@ const CSON = require('season');
 const TextEditor = require('../src/text-editor');
 const ScopeResolver = require('../src/scope-resolver.js');
 const WASMTreeSitterGrammar = require('../src/wasm-tree-sitter-grammar');
-const WASMTreeSitterLanguageMode = require('../src/wasm-tree-sitter-language-mode');
+const WASMTreeSitterLanguageMode = require('./helpers/tree-sitter-language-mode');
 const Random = require('random-seed');
 const { getRandomBufferRange, buildRandomLines } = require('./helpers/random');
 
@@ -34,7 +34,9 @@ const jsRegexGrammarPath = resolve(
 let jsRegexConfig = CSON.readFileSync(jsRegexGrammarPath);
 
 async function getAllCapturesWithScopeResolver(grammar, languageMode, scopeResolver, layer = null) {
-  let query = await grammar.getQuery('highlightsQuery');
+  // The language mode's own query, so this works with either Tree-sitter
+  // implementation.
+  let query = await languageMode.getQueryForGrammar(grammar, 'highlightsQuery');
   layer = layer ?? languageMode.rootLanguageLayer;
   let { start, end } = languageMode.buffer.getRange();
   let { tree } = layer;
@@ -244,10 +246,18 @@ describe('ScopeResolver', () => {
     let { scopeResolver, captures } = await getAllCaptures(grammar, languageMode);
 
     // Build a fake capture whose `startPosition` is equal to its `endPosition`.
+    // (Copy the node's properties explicitly: nodes may expose them as getters.)
     let fakeCapture = { ...captures[0] };
+    let { node } = fakeCapture;
     fakeCapture.node = {
-      ...fakeCapture.node,
-      endPosition: fakeCapture.node.startPosition
+      id: node.id,
+      type: node.type,
+      text: node.text,
+      childCount: node.childCount,
+      startIndex: node.startIndex,
+      endIndex: node.endIndex,
+      startPosition: node.startPosition,
+      endPosition: node.startPosition
     };
 
     let prevBoundaries = scopeResolver.boundaries.size;
