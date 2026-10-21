@@ -24,6 +24,7 @@ env:
   # worth investigating.)
   MAX_GLIBC_VERSION: '2.31'
   MAX_GLIBCXX_VERSION: '3.4.28'
+  NODE_VERSION: 24
   ROLLING_UPLOAD_TOKEN: ${{ secrets.ROLLING_RELEASE_UPLOAD_TOKEN }}
   # Below variables allow us to quickly control visual tests for each platform
   RUN_WINDOWS_VT: false
@@ -42,7 +43,7 @@ jobs:
           - os: ubuntu-24.04-arm
             image: "debian:10"
           - os: ubuntu-latest
-            image: "debian:10"
+            image: "debian:13"
       fail-fast: false
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.image }}
