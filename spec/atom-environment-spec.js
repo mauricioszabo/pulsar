@@ -213,29 +213,18 @@ describe('AtomEnvironment', () => {
       atom.enablePersistence = false;
     });
 
-    it('selects the state based on the current project paths', async () => {
+    it('computes the state key based on the current project paths', async () => {
       jasmine.useRealClock();
 
       const [dir1, dir2] = [temp.mkdirSync('dir1-'), temp.mkdirSync('dir2-')];
 
-      const loadSettings = Object.assign(atom.getLoadSettings(), {
-        initialProjectRoots: [dir1],
-        windowState: null
-      });
-
-      spyOn(atom, 'getLoadSettings').and.callFake(() => loadSettings);
-      spyOn(atom, 'serialize').and.returnValue({ stuff: 'cool' });
-
-      atom.project.setPaths([dir1, dir2]);
-
-      // State persistence will fail if other Atom instances are running
-      expect(await atom.stateStore.connect()).toBe(true);
-
-      await atom.saveState();
-      expect(await atom.loadState()).toBeFalsy();
-
-      loadSettings.initialProjectRoots = [dir2, dir1];
-      expect(await atom.loadState()).toEqual({ stuff: 'cool' });
+      let stateKey = await atom.getStateKey([dir1, dir2]);
+      expect(stateKey).toEqual(
+        await atom.getStateKey([dir1, dir2], { pathsOnly: true })
+      );
+      expect(stateKey).toEqual(
+        await atom.getStateKey([dir2, dir1], { pathsOnly: true })
+      );
     });
 
     it('saves state when the CPU is idle after a keydown or mousedown event', async () => {
@@ -938,6 +927,61 @@ describe('AtomEnvironment', () => {
 
       version = '1.7.0-dev-5340c91';
       expect(atom.getReleaseChannel()).toBe('dev');
+    });
+  });
+
+  describe('::trashItem()', () => {
+    let fileToBeTrashed, tempDir;
+    beforeEach(() => {
+      tempDir = temp.mkdirSync('trash-item-');
+      fileToBeTrashed = path.join(tempDir, 'file-1.txt');
+      fs.writeFileSync(fileToBeTrashed, 'test file');
+    });
+
+    it('trashes the file', async () => {
+      expect(fs.existsSync(fileToBeTrashed)).toBe(true);
+      await atom.trashItem(fileToBeTrashed);
+      expect(fs.existsSync(fileToBeTrashed)).toBe(false);
+    });
+
+    it('rejects when asked to trash a nonexistent file', async () => {
+      let nonexistentFile = path.join(tempDir, 'zzyzx.txt');
+      expect(fs.existsSync(nonexistentFile)).toBe(false);
+      let outcome = undefined;
+      // Assert that the `catch` clause was hit. (`expect().toThrow()` does not
+      // work with async functions.)
+      try {
+        await atom.trashItem(nonexistentFile);
+        outcome = 'success';
+      } catch (error) {
+        outcome = 'failure';
+      } finally {
+        expect(outcome).toBe('failure');
+      }
+    });
+  });
+
+  describe('::openPath()', () => {
+    // We can't test the success case without launching an external
+    // application.
+    it('rejects when asked to open a nonexistent path', async () => {
+      const tempDir = temp.mkdirSync('open-path-');
+      const nonexistentPath = path.join(tempDir, 'zzyzx.txt');
+      expect(fs.existsSync(nonexistentPath)).toBe(false);
+
+      // `atom.openPath` checks for the path's existence before asking the
+      // system to open it — otherwise, on Windows, the system would show an
+      // error dialog and wait for the user to dismiss it. The resulting
+      // error's `code` must also survive the trip from the main process.
+      let error;
+      try {
+        await atom.openPath(nonexistentPath);
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toEqual(jasmine.any(Error));
+      expect(error?.message).toBeTruthy();
+      expect(error?.code).toBe('ENOENT');
     });
   });
 });
