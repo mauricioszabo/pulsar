@@ -1,6 +1,7 @@
 const path = require('path')
 const _ = require('underscore-plus')
-const {TextEditor, BufferedProcess, CompositeDisposable, Disposable} = require('atom')
+const {TextEditor, CompositeDisposable, Disposable} = require('atom')
+const electron = require('electron')
 const fs = require('fs-plus')
 
 module.exports =
@@ -113,8 +114,8 @@ class PackageGeneratorView {
   }
 
   initPackage (packagePath, callback) {
-    const command = ['init'].concat(this.getInitOptions(packagePath))
-    this.runCommand(atom.packages.getApmPath(), command, callback)
+    const args = ['init'].concat(this.getInitOptions(packagePath))
+    this.runCommand(args, callback)
   }
 
   linkPackage (packagePath, callback) {
@@ -122,7 +123,7 @@ class PackageGeneratorView {
     if (atom.config.get('package-generator.createInDevMode')) args.push('--dev')
     args.push(packagePath.toString())
 
-    this.runCommand(atom.packages.getApmPath(), args, callback)
+    this.runCommand(args, callback)
   }
 
   isStoredInDotAtom (packagePath) {
@@ -143,7 +144,9 @@ class PackageGeneratorView {
     }
   }
 
-  runCommand (command, args, exit) {
-    this.process = new BufferedProcess({command, args, exit})
+  runCommand (args, exit) {
+    electron.ipcRenderer
+      .invoke('package-manager:run', { args })
+      .then(({ code }) => exit(code), () => exit(1))
   }
 }

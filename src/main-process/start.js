@@ -39,6 +39,13 @@ module.exports = function start(resourcePath, devResourcePath, startTime) {
 
   const args = parseCommandLine(process.argv.slice(1));
 
+  // When `-p` / `--package` is set, `parseCommandLine` kicks off the
+  // in-process package manager and returns a sentinel. Bail out
+  // immediately so Pulsar's main process doesn't try to register IPC
+  // handlers, open a window, etc. while the package operation runs.
+  // The package manager will call `process.exit` when it finishes.
+  if (args && args.packageMode) return;
+
   args.resourcePath = normalizeDriveLetterName(resourcePath);
   args.devResourcePath = normalizeDriveLetterName(devResourcePath);
 

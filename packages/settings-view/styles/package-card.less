@@ -82,6 +82,18 @@
       margin: 0;
     }
 
+    .package-install-progress {
+      // Hidden until install/update/uninstall starts writing chunks; JS
+      // toggles `display` and clears the text on completion.
+      display: none;
+      margin-top: 4px;
+      font-family: monospace;
+      font-size: 90%;
+      white-space: pre-wrap;
+      max-height: 8em;
+      overflow-y: auto;
+    }
+
     .downloads {
       color: @text-color-highlight;
       overflow: hidden;

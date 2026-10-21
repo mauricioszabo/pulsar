@@ -1,4 +1,4 @@
-const { BufferedProcess } = require('atom');
+const electron = require('electron');
 const UpdatePackageDependenciesStatusView = require('./update-package-dependencies-status-view');
 
 module.exports = {
@@ -25,49 +25,34 @@ module.exports = {
   },
 
   update() {
-    if (this.process) return; // Do not allow multiple apm processes to run
+    if (this.running) return; // Do not allow concurrent installs.
+    this.running = true;
     if (this.updatePackageDependenciesStatusView)
       this.updatePackageDependenciesStatusView.attach();
 
-    let errorOutput = '';
-
-    const command = atom.packages.getApmPath();
     const args = ['install', '--no-color'];
-    const stderr = output => {
-      errorOutput += output;
-    };
-    const options = {
-      cwd: this.getActiveProjectPath(),
-      env: Object.assign({}, process.env, { NODE_ENV: 'development' })
-    };
+    const opts = { cwd: this.getActiveProjectPath() };
 
-    const exit = code => {
-      this.process = null;
-      if (this.updatePackageDependenciesStatusView)
-        this.updatePackageDependenciesStatusView.detach();
-
-      if (code === 0) {
-        atom.notifications.addSuccess('Package dependencies updated');
-      } else {
-        atom.notifications.addError('Failed to update package dependencies', {
-          detail: errorOutput,
-          dismissable: true
-        });
+    this.runPackageManager({ args, opts }).then(
+      ({ code, stderr }) => {
+        this.running = false;
+        if (this.updatePackageDependenciesStatusView)
+          this.updatePackageDependenciesStatusView.detach();
+        if (code === 0) {
+          atom.notifications.addSuccess('Package dependencies updated');
+        } else {
+          atom.notifications.addError('Failed to update package dependencies', {
+            detail: stderr,
+            dismissable: true
+          });
+        }
       }
-    };
-
-    this.process = this.runBufferedProcess({
-      command,
-      args,
-      stderr,
-      exit,
-      options
-    });
+    );
   },
 
-  // This function exists so that it can be spied on by tests
-  runBufferedProcess(params) {
-    return new BufferedProcess(params);
+  // Exposed so tests can stub it.
+  runPackageManager({ args, opts }) {
+    return electron.ipcRenderer.invoke('package-manager:run', { args, opts });
   },
 
   getActiveProjectPath() {
