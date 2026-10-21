@@ -63,8 +63,8 @@ jobs:
     - name: Edit sources.list - Linux
       if: ${{ runner.os == 'Linux' }}
       run: |
-        sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list
-        sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
+        # sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list
+        # sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
         # Unlike master's version of this step, we run `apt-get update` here:
         # the GCC toolchain step below needs `curl` before "Install build
         # dependencies" (which does its own update) has run.
