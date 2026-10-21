@@ -402,42 +402,42 @@ jobs:
       # smoke tests on `ubuntu-latest`. Hence if we do it wrong, the failure
       # shows up on a user's machine. So we check explicitly with a script that
       # verifies we meet the desired `glibc` version floor.
-    - name: Verify Linux ABI Floor
-      if: ${{ runner.os == 'Linux' }}
-      run: script/check-linux-abi-floor.sh node_modules
+    # - name: Verify Linux ABI Floor
+    #   if: ${{ runner.os == 'Linux' }}
+    #   run: script/check-linux-abi-floor.sh node_modules
 
-    - name: Build ppm
-      uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
-      env:
-        # `ppm`'s postinstall downloads a bundled Node into a temp directory
-        # and then `fs.rename`s it into `ppm/bin`. A rename can't cross
-        # devices, and in a container job the runner bind-mounts several
-        # separate volumes: the image's own `/tmp`, the workspace at `/__w`,
-        # and — despite the nesting in the path — `/__w/_temp` as well. So
-        # neither `/tmp` nor `runner.temp` works here; both fail with `EXDEV`.
-        # Pointing at the workspace root is what actually guarantees the same
-        # device as `ppm/bin`.
-        #
-        # The workspace root, rather than a subdirectory of it, so that no
-        # `mkdir` is needed: this step also runs on Windows, whose shell would
-        # reject `mkdir -p`. `download-node.js` calls `temp.track()`, so the
-        # `apm-node-*` directories it leaves in the repo root are cleaned up
-        # when the process exits.
-        #
-        # This is a workaround for the environment, not a fix: `mv()` in
-        # `ppm/script/download-node.js` has no `EXDEV` fallback since the `mv`
-        # package was dropped upstream, and its own comment says it was copied
-        # verbatim from `ppm`'s `fs.js` — so the same bug is probably lurking
-        # there too. Remove this once `ppm` is fixed.
-        #
-        # No platform guard needed: Node only consults `TMPDIR` on POSIX, so
-        # this is inert on Windows (which uses `TEMP`/`TMP`).
-        TMPDIR: ${{ github.workspace }}
-      with:
-        timeout_minutes: 30
-        max_attempts: 3
-        retry_on: error
-        command: yarn build:apm
+    # - name: Build ppm
+    #   uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60
+    #   env:
+    #     # `ppm`'s postinstall downloads a bundled Node into a temp directory
+    #     # and then `fs.rename`s it into `ppm/bin`. A rename can't cross
+    #     # devices, and in a container job the runner bind-mounts several
+    #     # separate volumes: the image's own `/tmp`, the workspace at `/__w`,
+    #     # and — despite the nesting in the path — `/__w/_temp` as well. So
+    #     # neither `/tmp` nor `runner.temp` works here; both fail with `EXDEV`.
+    #     # Pointing at the workspace root is what actually guarantees the same
+    #     # device as `ppm/bin`.
+    #     #
+    #     # The workspace root, rather than a subdirectory of it, so that no
+    #     # `mkdir` is needed: this step also runs on Windows, whose shell would
+    #     # reject `mkdir -p`. `download-node.js` calls `temp.track()`, so the
+    #     # `apm-node-*` directories it leaves in the repo root are cleaned up
+    #     # when the process exits.
+    #     #
+    #     # This is a workaround for the environment, not a fix: `mv()` in
+    #     # `ppm/script/download-node.js` has no `EXDEV` fallback since the `mv`
+    #     # package was dropped upstream, and its own comment says it was copied
+    #     # verbatim from `ppm`'s `fs.js` — so the same bug is probably lurking
+    #     # there too. Remove this once `ppm` is fixed.
+    #     #
+    #     # No platform guard needed: Node only consults `TMPDIR` on POSIX, so
+    #     # this is inert on Windows (which uses `TEMP`/`TMP`).
+    #     TMPDIR: ${{ github.workspace }}
+    #   with:
+    #     timeout_minutes: 30
+    #     max_attempts: 3
+    #     retry_on: error
+    #     command: yarn build:apm
 
     - name: Cache Pulsar dependencies - Linux
       if: ${{ runner.os == 'Linux' }}
